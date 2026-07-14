@@ -1,0 +1,15 @@
+{
+  "identifier": "run.rosie.tuxedomd.pro",
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

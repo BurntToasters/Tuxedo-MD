@@ -1,0 +1,39 @@
+node_modules/
+dist/
+coverage/
+coverage-headless/
+release/
+msstore/
+flatpak-repo/
+flatpak-build*/
+.env
+.DS_Store
+src-tauri/target/
+src-tauri/gen/
+src-tauri/embedded.provisionprofile
+*.log
+GH_TOKEN=
+
+GPG_KEY_ID=
+GPG_PASSPHRASE=
+
+TAURI_SIGNING_PRIVATE_KEY=
+TAURI_SIGNING_PRIVATE_KEY_PASSWORD=
+
+APPLE_SIGNING_IDENTITY=
+APPLE_ID=
+APPLE_PASSWORD=
+APPLE_TEAM_ID=
+# Legacy alias supported when APPLE_PASSWORD is unset:
+# APPLE_APP_SPECIFIC_PASSWORD=
+SSH_USER_PWD=
+
+AFTER_PACK_LOC=
+
+MSSTORE_IDENTITY_NAME=
+MSSTORE_PUBLISHER=
+MSSTORE_PUBLISHER_DISPLAY_NAME=
+
+# TUXEDO_RELEASE_CONFIRM=YES
+# GH_REPO_OWNER=BurntToasters
+# GH_REPO_NAME=TuxedoMD

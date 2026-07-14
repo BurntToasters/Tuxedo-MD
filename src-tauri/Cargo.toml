@@ -1,0 +1,28 @@
+[package]
+name = "tuxedomd"
+version = "0.1.0-alpha.1"
+description = "A sleek, local-first Markdown editor"
+authors = ["BurntToasters"]
+edition = "2021"
+license = "MPL-2.0"
+repository = "https://github.com/BurntToasters/Tuxedo-MD"
+
+[lib]
+name = "tuxedomd_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+thiserror = "2"
+walkdir = "2"
+
+[features]
+default = []
+mas = []

@@ -1,0 +1,17 @@
+{
+  "identifier": "run.rosie.tuxedomd.pro",
+  "app": {
+    "macOSPrivateApi": false
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "macOS": {
+      "entitlements": "Entitlements.appstore.plist",
+      "minimumSystemVersion": "12.0",
+      "signingIdentity": null,
+      "files": {
+        "embedded.provisionprofile": "embedded.provisionprofile"
+      }
+    }
+  }
+}
