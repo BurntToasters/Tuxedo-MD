@@ -3,6 +3,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::Mutex,
 };
 use tauri::{AppHandle, Emitter, Manager};
 use thiserror::Error;
@@ -10,6 +11,8 @@ use walkdir::{DirEntry, WalkDir};
 
 const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_WORKSPACE_FILES: usize = 20_000;
+
+struct PendingOpenPaths(Mutex<Vec<String>>);
 
 #[derive(Debug, Error)]
 enum AppError {
@@ -144,11 +147,7 @@ fn save_document(
         let mut file = fs::File::create(&temporary)?;
         file.write_all(content.as_bytes())?;
         file.sync_all()?;
-        if path.exists() {
-            #[cfg(windows)]
-            fs::remove_file(&path)?;
-        }
-        fs::rename(&temporary, &path)?;
+        replace_file(&temporary, &path)?;
         Ok(())
     })();
 
@@ -215,12 +214,46 @@ fn write_replacement(path: &Path, content: &[u8]) -> Result<(), AppError> {
     let mut file = fs::File::create(&temporary)?;
     file.write_all(content)?;
     file.sync_all()?;
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    fs::rename(&temporary, path)?;
+    replace_file(&temporary, path)?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(temporary, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::{ffi::OsStr, os::windows::ffi::OsStrExt, ptr::null};
+    use windows_sys::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_WRITE_THROUGH};
+
+    if !destination.exists() {
+        return fs::rename(temporary, destination);
+    }
+    let wide = |path: &Path| {
+        OsStr::new(path.as_os_str())
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<u16>>()
+    };
+    let destination = wide(destination);
+    let temporary = wide(temporary);
+    let replaced = unsafe {
+        ReplaceFileW(
+            destination.as_ptr(),
+            temporary.as_ptr(),
+            null(),
+            REPLACEFILE_WRITE_THROUGH,
+            0,
+            0,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -286,6 +319,23 @@ fn get_build_info() -> BuildInfo {
     }
 }
 
+fn markdown_paths(arguments: impl IntoIterator<Item = String>) -> Vec<String> {
+    arguments
+        .into_iter()
+        .filter_map(|argument| {
+            let path = PathBuf::from(argument);
+            path.is_file().then_some(path)
+        })
+        .filter(|path| is_markdown(path))
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect()
+}
+
+#[tauri::command]
+fn take_pending_open_paths(state: tauri::State<PendingOpenPaths>) -> Vec<String> {
+    std::mem::take(&mut *state.0.lock().expect("pending open path lock poisoned"))
+}
+
 fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
     let handle = app.handle();
@@ -327,7 +377,27 @@ fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
         "View",
         true,
         &[
-            &MenuItem::with_id(handle, "split-view", "Split View", true, None::<&str>)?,
+            &MenuItem::with_id(
+                handle,
+                "toggle-sidebar",
+                "Toggle Tools",
+                true,
+                Some("CmdOrCtrl+Shift+B"),
+            )?,
+            &MenuItem::with_id(
+                handle,
+                "editor-view",
+                "Editor",
+                true,
+                Some("CmdOrCtrl+Shift+E"),
+            )?,
+            &MenuItem::with_id(
+                handle,
+                "preview-view",
+                "Preview",
+                true,
+                Some("CmdOrCtrl+Shift+V"),
+            )?,
             &MenuItem::with_id(handle, "settings", "Settings", true, Some("CmdOrCtrl+,"))?,
         ],
     )?;
@@ -337,7 +407,22 @@ fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let pending_paths = markdown_paths(std::env::args().skip(1));
+    let mut builder = tauri::Builder::default().manage(PendingOpenPaths(Mutex::new(pending_paths)));
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, arguments, _| {
+            let paths = markdown_paths(arguments);
+            if !paths.is_empty() {
+                let _ = app.emit("open-paths", paths);
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+    builder
         .setup(|app| Ok(setup_native_menu(app)?))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -349,7 +434,8 @@ pub fn run() {
             get_build_info,
             load_app_state,
             save_app_state,
-            delete_app_state
+            delete_app_state,
+            take_pending_open_paths
         ])
         .on_menu_event(|app, event| {
             let _ = app.emit("native-menu-command", event.id().as_ref().to_string());

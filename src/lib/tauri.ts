@@ -66,3 +66,7 @@ export async function saveState(key: string, value: unknown): Promise<void> {
 export async function deleteState(key: string): Promise<void> {
   await invoke('delete_app_state', { key });
 }
+
+export async function takePendingOpenPaths(): Promise<string[]> {
+  return invoke<string[]>('take_pending_open_paths');
+}

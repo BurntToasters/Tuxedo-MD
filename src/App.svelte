@@ -1,16 +1,14 @@
 <script lang="ts">
   import {
     BookOpenText,
-    Check,
-    Columns2,
     FilePlus2,
     FolderOpen,
-    PanelLeftClose,
+    History,
+    ListTree,
     PanelLeftOpen,
     Save,
     Search,
     Settings2,
-    Sparkles,
     X,
   } from '@lucide/svelte';
   import { onMount } from 'svelte';
@@ -28,7 +26,9 @@
     loadState,
     saveState,
     deleteState,
+    takePendingOpenPaths,
   } from './lib/tauri';
+  import { applyNativeWindowEffects, resizeWindowForDrawer } from './lib/window';
   import {
     defaultSettings,
     type AppSettings,
@@ -55,11 +55,15 @@ A sleek, focused Markdown workspace with native desktop packaging.
 Try editing this document, or open a Markdown file from the toolbar.`;
 
   const initialTab = createTab('Welcome.md', welcomeMarkdown);
+  type DrawerPanel = 'files' | 'outline' | 'recent';
   let tabs = $state<DocumentTab[]>([initialTab]);
   let activeId = $state(initialTab.id);
-  let mode = $state<EditorMode>('split');
+  let mode = $state<EditorMode>('source');
+  let isMacPlatform = $state(false);
   let preview = $state('');
-  let sidebarOpen = $state(true);
+  let sidebarOpen = $state(false);
+  let drawerOverlay = $state(false);
+  let drawerPanel = $state<DrawerPanel>('files');
   let workspaceRoot = $state('');
   let workspaceFiles = $state<WorkspaceEntry[]>([]);
   let filter = $state('');
@@ -71,9 +75,6 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let conflictTabId = $state<string | null>(null);
   let recentFiles = $state<string[]>([]);
   let recentWorkspaces = $state<string[]>([]);
-  let filesExpanded = $state(true);
-  let outlineExpanded = $state(true);
-  let recentExpanded = $state(false);
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
   let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
@@ -101,12 +102,18 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     document.documentElement.dataset.theme = settings.theme;
     document.documentElement.dataset.glass = settings.glassEffects;
     document.documentElement.style.setProperty('--editor-font-size', `${settings.fontSize}px`);
+    void applyNativeWindowEffects(settings.glassEffects, settings.theme !== 'light');
   });
 
   onMount(() => {
+    isMacPlatform = navigator.userAgent.includes('Macintosh');
     void restoreState();
     pollTimer = setInterval(() => void checkExternalChanges(), 2000);
     const onKeydown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && sidebarOpen && drawerOverlay) {
+        void setSidebarOpen(false);
+        return;
+      }
       if (!(event.metaKey || event.ctrlKey)) return;
       if (event.key.toLowerCase() === 's') {
         event.preventDefault();
@@ -117,6 +124,15 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       } else if (event.key.toLowerCase() === 'n') {
         event.preventDefault();
         newDocument();
+      } else if (event.key.toLowerCase() === 'e' && event.shiftKey) {
+        event.preventDefault();
+        mode = 'source';
+      } else if (event.key.toLowerCase() === 'v' && event.shiftKey) {
+        event.preventDefault();
+        mode = 'preview';
+      } else if (event.key.toLowerCase() === 'b' && event.shiftKey) {
+        event.preventDefault();
+        void setSidebarOpen(!sidebarOpen);
       } else if (event.key.toLowerCase() === 'p' && event.shiftKey) {
         event.preventDefault();
         paletteOpen = true;
@@ -126,14 +142,24 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     let unlisten: (() => void) | undefined;
     if (isDesktop()) {
       void import('@tauri-apps/api/event').then(async ({ listen }) => {
-        unlisten = await listen<string>('native-menu-command', ({ payload }) => {
+        const menuUnlisten = await listen<string>('native-menu-command', ({ payload }) => {
           if (payload === 'new-document') newDocument();
           else if (payload === 'open-document') void openFile();
           else if (payload === 'save-document') void saveActive(false);
           else if (payload === 'command-palette') paletteOpen = true;
           else if (payload === 'settings') settingsOpen = true;
-          else if (payload === 'split-view') mode = 'split';
+          else if (payload === 'editor-view') mode = 'source';
+          else if (payload === 'preview-view') mode = 'preview';
+          else if (payload === 'toggle-sidebar') void setSidebarOpen(!sidebarOpen);
         });
+        const openUnlisten = await listen<string[]>('open-paths', ({ payload }) => {
+          for (const path of payload) void openWorkspaceFile(path);
+        });
+        unlisten = () => {
+          menuUnlisten();
+          openUnlisten();
+        };
+        for (const path of await takePendingOpenPaths()) void openWorkspaceFile(path);
       });
       void import('@tauri-apps/api/webviewWindow').then(async ({ getCurrentWebviewWindow }) => {
         const unlistenDrop = await getCurrentWebviewWindow().onDragDropEvent((event) => {
@@ -224,7 +250,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       if (!workspace) return;
       workspaceRoot = workspace.root;
       workspaceFiles = workspace.entries;
-      sidebarOpen = true;
+      if (!sidebarOpen) await setSidebarOpen(true);
       status = `${workspace.entries.length} Markdown files found`;
       recentWorkspaces = remember(recentWorkspaces, workspace.root);
       schedulePersistence();
@@ -239,6 +265,18 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     } catch (error) {
       status = readableError(error);
     }
+  }
+
+  async function setSidebarOpen(open: boolean) {
+    if (!open) {
+      sidebarOpen = false;
+      drawerOverlay = false;
+      await resizeWindowForDrawer(false);
+      return;
+    }
+    const resized = sidebarOpen ? !drawerOverlay : await resizeWindowForDrawer(true);
+    drawerOverlay = !resized;
+    sidebarOpen = true;
   }
 
   async function saveActive(saveAs = false) {
@@ -345,7 +383,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         session.activeId && session.tabs.some((tab) => tab.id === session.activeId)
           ? session.activeId
           : session.tabs[0].id;
-      mode = session.mode;
+      // Older sessions may have used the now-retired side-by-side layout.
+      mode = session.mode === 'split' ? 'source' : session.mode;
       workspaceRoot = session.workspaceRoot;
       recentFiles = session.recentFiles ?? [];
       recentWorkspaces = session.recentWorkspaces ?? [];
@@ -429,7 +468,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 <svelte:head><title>Tuxedo MD</title></svelte:head>
 
 <div class="app-shell">
-  <header class="titlebar" data-tauri-drag-region>
+  <header class:mac-titlebar={isMacPlatform} class="titlebar" data-tauri-drag-region>
     <div class="brand" data-tauri-drag-region>
       <div class="brand-mark"><BookOpenText size={18} /></div>
       <span>Tuxedo MD</span>
@@ -437,21 +476,18 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     </div>
 
     <div class="toolbar">
+      <button
+        class:active={sidebarOpen}
+        class="icon-button"
+        title="Toggle tools"
+        aria-label="Toggle tools"
+        aria-expanded={sidebarOpen}
+        onclick={() => void setSidebarOpen(!sidebarOpen)}><PanelLeftOpen /></button
+      >
       <button class="icon-button" title="New document" onclick={newDocument}><FilePlus2 /></button>
       <button class="icon-button" title="Open file" onclick={openFile}><FolderOpen /></button>
       <button class="icon-button" title="Save" onclick={() => saveActive(false)}><Save /></button>
       <span class="toolbar-divider"></span>
-      <div class="mode-switcher" aria-label="Editor layout">
-        <button class:active={mode === 'source'} onclick={() => (mode = 'source')} title="Source"
-          >MD</button
-        >
-        <button class:active={mode === 'split'} onclick={() => (mode = 'split')} title="Split view"
-          ><Columns2 /></button
-        >
-        <button class:active={mode === 'preview'} onclick={() => (mode = 'preview')} title="Preview"
-          ><Sparkles /></button
-        >
-      </div>
       <button class="icon-button" title="Settings" onclick={() => (settingsOpen = true)}
         ><Settings2 /></button
       >
@@ -463,32 +499,50 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
   <div class="workspace">
     {#if sidebarOpen}
-      <aside class="sidebar">
+      {#if drawerOverlay}
+        <button
+          class="drawer-backdrop"
+          aria-label="Close tools"
+          onclick={() => void setSidebarOpen(false)}
+        ></button>
+      {/if}
+      <aside class:overlay={drawerOverlay} class="sidebar" aria-label="Workspace tools">
         <div class="sidebar-heading">
           <div>
-            <span>Workspace</span>
-            <strong
-              >{workspaceRoot
-                ? (workspaceRoot.split(/[\\/]/).at(-1) ?? 'Folder')
-                : 'No folder open'}</strong
-            >
+            <span>Tools</span>
+            <strong>{drawerPanel}</strong>
           </div>
           <button
             class="icon-button quiet"
-            onclick={() => (sidebarOpen = false)}
-            title="Hide sidebar"><PanelLeftClose /></button
+            onclick={() => void setSidebarOpen(false)}
+            title="Hide tools"><X /></button
           >
         </div>
-        <button class="open-workspace" onclick={openWorkspace}><FolderOpen /> Open workspace</button
-        >
-        <label class="search-box">
-          <Search />
-          <input bind:value={filter} placeholder="Filter files" />
-        </label>
-        <button class="section-toggle" onclick={() => (filesExpanded = !filesExpanded)}
-          >Files <span>{filesExpanded ? '−' : '+'}</span></button
-        >
-        {#if filesExpanded}<nav class="file-list" aria-label="Workspace files">
+        <nav class="drawer-tabs" aria-label="Tool panels">
+          <button class:active={drawerPanel === 'files'} onclick={() => (drawerPanel = 'files')}
+            ><FolderOpen /> Files</button
+          >
+          <button class:active={drawerPanel === 'outline'} onclick={() => (drawerPanel = 'outline')}
+            ><ListTree /> Outline</button
+          >
+          <button class:active={drawerPanel === 'recent'} onclick={() => (drawerPanel = 'recent')}
+            ><History /> Recent</button
+          >
+        </nav>
+        {#if drawerPanel === 'files'}
+          <p class="drawer-context">
+            {workspaceRoot
+              ? (workspaceRoot.split(/[\\/]/).at(-1) ?? 'Workspace')
+              : 'No workspace open'}
+          </p>
+          <button class="open-workspace" onclick={openWorkspace}
+            ><FolderOpen /> Open workspace</button
+          >
+          <label class="search-box">
+            <Search />
+            <input bind:value={filter} placeholder="Filter files" />
+          </label>
+          <nav class="file-list" aria-label="Workspace files">
             {#each filteredFiles as file (file.path)}
               <button onclick={() => openWorkspaceFile(file.path)} title={file.relativePath}>
                 <span>{file.name}</span><small>{file.relativePath}</small>
@@ -498,11 +552,9 @@ Try editing this document, or open a Markdown file from the toolbar.`;
                 {workspaceRoot ? 'No matching Markdown files.' : 'Open a folder to begin.'}
               </p>
             {/each}
-          </nav>{/if}
-        <button class="section-toggle" onclick={() => (outlineExpanded = !outlineExpanded)}
-          >Outline <span>{outlineExpanded ? '−' : '+'}</span></button
-        >
-        {#if outlineExpanded}<nav class="outline-list" aria-label="Document outline">
+          </nav>
+        {:else if drawerPanel === 'outline'}
+          <nav class="outline-list drawer-list" aria-label="Document outline">
             {#each outline as item (item.line)}
               <button
                 style={`--outline-level:${item.level}`}
@@ -512,59 +564,49 @@ Try editing this document, or open a Markdown file from the toolbar.`;
                 title={`Line ${item.line}`}>{item.title}</button
               >
             {:else}<p class="empty-state">No headings in this document.</p>{/each}
-          </nav>{/if}
-        <button class="section-toggle" onclick={() => (recentExpanded = !recentExpanded)}
-          >Recent <span>{recentExpanded ? '−' : '+'}</span></button
-        >
-        {#if recentExpanded}<nav class="outline-list" aria-label="Recent files">
+          </nav>
+        {:else}
+          <nav class="outline-list drawer-list" aria-label="Recent files">
             {#each recentFiles as path (path)}<button onclick={() => openWorkspaceFile(path)}
                 >{path.split(/[\\/]/).at(-1)}</button
               >{:else}<p class="empty-state">No recent files yet.</p>{/each}
-          </nav>{/if}
-        <div class="sidebar-upgrade">
-          <Sparkles />
-          <div>
-            <strong>Workspace intelligence</strong><span
-              >{isFullEdition ? 'Pro features enabled' : 'Backlinks, graphs, and more in Pro'}</span
-            >
-          </div>
-          {#if isFullEdition}<Check class="enabled" />{/if}
-        </div>
+          </nav>
+        {/if}
       </aside>
-    {:else}
-      <button class="sidebar-restore" onclick={() => (sidebarOpen = true)} title="Show sidebar"
-        ><PanelLeftOpen /></button
-      >
     {/if}
 
     <main class="main-area">
-      <div class="tabs">
-        {#each tabs as tab (tab.id)}
-          <div class:active={tab.id === activeId} class="tab">
-            <button class="tab-select" onclick={() => (activeId = tab.id)}>
-              <span class:dirty={tab.content !== tab.savedContent}>{tab.name}</span>
-            </button>
-            <button
-              class="tab-close"
-              title={`Close ${tab.name}`}
-              onclick={(event) => {
-                event.stopPropagation();
-                closeTab(tab.id);
-              }}><X /></button
-            >
-          </div>
-        {/each}
-        <button class="new-tab" onclick={newDocument} title="New tab">+</button>
-      </div>
+      {#if tabs.length > 1}<div class="tabs">
+          {#each tabs as tab (tab.id)}
+            <div class:active={tab.id === activeId} class="tab">
+              <button class="tab-select" onclick={() => (activeId = tab.id)}>
+                <span class:dirty={tab.content !== tab.savedContent}>{tab.name}</span>
+              </button>
+              <button
+                class="tab-close"
+                title={`Close ${tab.name}`}
+                onclick={(event) => {
+                  event.stopPropagation();
+                  closeTab(tab.id);
+                }}><X /></button
+              >
+            </div>
+          {/each}
+          <button class="new-tab" onclick={newDocument} title="New tab">+</button>
+        </div>{/if}
 
-      <section
-        class:source-only={mode === 'source'}
-        class:preview-only={mode === 'preview'}
-        class="editor-grid"
-      >
+      <section class:split-layout={mode === 'split'} class="editor-grid">
         {#if mode !== 'preview'}
           <div class:nowrap={!settings.lineWrap} class="source-pane">
-            <div class="pane-label">Markdown</div>
+            <div class="pane-label">
+              <span>Markdown</span>
+              <div class="document-view-toggle" aria-label="Document view">
+                <button class:active={mode === 'source'} onclick={() => (mode = 'source')}
+                  >Editor</button
+                >
+                <button onclick={() => (mode = 'preview')}>Preview</button>
+              </div>
+            </div>
             <MarkdownEditor
               documentId={activeTab?.id ?? 'empty'}
               value={activeTab?.content ?? ''}
@@ -575,7 +617,15 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         {/if}
         {#if mode !== 'source'}
           <article class="preview-pane">
-            <div class="pane-label">Preview</div>
+            <div class="pane-label">
+              <span>Preview</span>
+              <div class="document-view-toggle" aria-label="Document view">
+                <button onclick={() => (mode = 'source')}>Editor</button>
+                <button class:active={mode === 'preview'} onclick={() => (mode = 'preview')}
+                  >Preview</button
+                >
+              </div>
+            </div>
             <!-- Preview HTML is produced by rehype-sanitize in src/lib/preview.ts. -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
             <div class="markdown-body">{@html preview}</div>
@@ -703,9 +753,15 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       >
       <button
         onclick={() => {
-          mode = 'split';
+          mode = 'source';
           paletteOpen = false;
-        }}>Switch to split view</button
+        }}>Show editor <kbd>⌘⇧E</kbd></button
+      >
+      <button
+        onclick={() => {
+          mode = 'preview';
+          paletteOpen = false;
+        }}>Show preview <kbd>⌘⇧V</kbd></button
       >
     </dialog>
   </div>

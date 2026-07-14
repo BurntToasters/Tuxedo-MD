@@ -62,7 +62,7 @@ export const defaultSettings: AppSettings = {
   autosaveDelayMs: 1500,
   restoreSession: true,
   keepDraftsSilently: false,
-  theme: 'system',
+  theme: 'dark',
   glassEffects: 'system',
   fontSize: 14,
   lineWrap: true,

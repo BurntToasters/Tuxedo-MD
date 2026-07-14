@@ -1,7 +1,21 @@
 {
   "identifier": "run.rosie.tuxedomd.pro",
   "app": {
-    "macOSPrivateApi": false
+    "macOSPrivateApi": false,
+    "windows": [
+      {
+        "title": "Tuxedo MD",
+        "width": 980,
+        "height": 780,
+        "minWidth": 760,
+        "minHeight": 520,
+        "transparent": false,
+        "decorations": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": { "x": 18, "y": 18 }
+      }
+    ]
   },
   "bundle": {
     "createUpdaterArtifacts": false,

@@ -14,8 +14,8 @@
     "windows": [
       {
         "title": "Tuxedo MD",
-        "width": 1280,
-        "height": 820,
+        "width": 980,
+        "height": 780,
         "minWidth": 760,
         "minHeight": 520,
         "transparent": true,

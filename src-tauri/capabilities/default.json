@@ -3,5 +3,13 @@
   "identifier": "default",
   "description": "Tuxedo MD desktop permissions",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "opener:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-set-effects",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "opener:default"
+  ]
 }

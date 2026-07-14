@@ -111,7 +111,7 @@ Never publish directly from an unreviewed automated step. The release commands c
 
 - Preview HTML is sanitized by default. Raw HTML, external resources, and plugin execution require explicit threat review.
 - Native commands accept only the minimum data required and return structured errors.
-- Saves use a same-directory temporary file, flush, and rename to reduce corruption risk. Add true replace-file semantics on Windows before production release.
+- Saves use a same-directory temporary file, flush, and replacement. Windows uses `ReplaceFileW` with write-through semantics; Unix uses same-directory rename.
 - Add crash recovery before calling the editor production-ready.
 - Do not execute workspace content or follow directory symlinks during indexing.
 - Bound document size, file count, recursion, and expensive render extensions.
@@ -123,7 +123,7 @@ Never publish directly from an unreviewed automated step. The release commands c
 
 ### Phase 1 — editor foundation
 
-Implemented foundation: guarded autosave, recovery/session persistence, external-change conflict handling, per-tab editor state, settings, outline/recent sidebar sections, command palette, and native menu routing. The remaining items below are polish and platform-validation work.
+Implemented foundation: guarded autosave, recovery/session persistence, external-change conflict handling, per-tab editor state, settings, outline/recent sidebar sections, command palette, native menu routing, single-instance file handoff, and drag/drop opening. The remaining items below are polish and platform-validation work.
 
 - Finish tab lifecycle prompts and external-change detection.
 - Autosave preferences plus crash/session recovery.
