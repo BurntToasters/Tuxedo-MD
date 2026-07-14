@@ -123,6 +123,8 @@ Never publish directly from an unreviewed automated step. The release commands c
 
 ### Phase 1 — editor foundation
 
+Implemented foundation: guarded autosave, recovery/session persistence, external-change conflict handling, per-tab editor state, settings, outline/recent sidebar sections, command palette, and native menu routing. The remaining items below are polish and platform-validation work.
+
 - Finish tab lifecycle prompts and external-change detection.
 - Autosave preferences plus crash/session recovery.
 - Find/replace, editor commands, Markdown shortcuts, outline, and scroll sync.

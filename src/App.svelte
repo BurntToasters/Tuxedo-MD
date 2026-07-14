@@ -24,8 +24,20 @@
     isDesktop,
     readDocument,
     writeDocument,
+    probeDocument,
+    loadState,
+    saveState,
+    deleteState,
   } from './lib/tauri';
-  import type { DocumentTab, EditorMode, FileDocument, WorkspaceEntry } from './lib/types';
+  import {
+    defaultSettings,
+    type AppSettings,
+    type DocumentTab,
+    type EditorMode,
+    type FileDocument,
+    type SessionState,
+    type WorkspaceEntry,
+  } from './lib/types';
 
   const welcomeMarkdown = `# Welcome to Tuxedo MD
 
@@ -52,10 +64,32 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let workspaceFiles = $state<WorkspaceEntry[]>([]);
   let filter = $state('');
   let status = $state('Ready');
+  let settings = $state<AppSettings>(defaultSettings);
+  let settingsOpen = $state(false);
+  let paletteOpen = $state(false);
+  let conflictOpen = $state(false);
+  let conflictTabId = $state<string | null>(null);
+  let recentFiles = $state<string[]>([]);
+  let recentWorkspaces = $state<string[]>([]);
+  let filesExpanded = $state(true);
+  let outlineExpanded = $state(true);
+  let recentExpanded = $state(false);
+  let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId) ?? tabs[0]);
   let filteredFiles = $derived(
     workspaceFiles.filter((file) => file.relativePath.toLowerCase().includes(filter.toLowerCase()))
+  );
+  let outline = $derived(
+    (activeTab?.content ?? '')
+      .split('\n')
+      .map((line, index) => {
+        const match = /^(#{1,6})\s+(.+?)\s*#*$/.exec(line);
+        return match ? { level: match[1].length, title: match[2], line: index + 1 } : null;
+      })
+      .filter((item): item is { level: number; title: string; line: number } => item !== null)
   );
 
   $effect(() => {
@@ -63,7 +97,15 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     renderMarkdown(content).then((html) => (preview = html));
   });
 
+  $effect(() => {
+    document.documentElement.dataset.theme = settings.theme;
+    document.documentElement.dataset.glass = settings.glassEffects;
+    document.documentElement.style.setProperty('--editor-font-size', `${settings.fontSize}px`);
+  });
+
   onMount(() => {
+    void restoreState();
+    pollTimer = setInterval(() => void checkExternalChanges(), 2000);
     const onKeydown = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return;
       if (event.key.toLowerCase() === 's') {
@@ -75,18 +117,64 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       } else if (event.key.toLowerCase() === 'n') {
         event.preventDefault();
         newDocument();
+      } else if (event.key.toLowerCase() === 'p' && event.shiftKey) {
+        event.preventDefault();
+        paletteOpen = true;
       }
     };
     window.addEventListener('keydown', onKeydown);
-    return () => window.removeEventListener('keydown', onKeydown);
+    let unlisten: (() => void) | undefined;
+    if (isDesktop()) {
+      void import('@tauri-apps/api/event').then(async ({ listen }) => {
+        unlisten = await listen<string>('native-menu-command', ({ payload }) => {
+          if (payload === 'new-document') newDocument();
+          else if (payload === 'open-document') void openFile();
+          else if (payload === 'save-document') void saveActive(false);
+          else if (payload === 'command-palette') paletteOpen = true;
+          else if (payload === 'settings') settingsOpen = true;
+          else if (payload === 'split-view') mode = 'split';
+        });
+      });
+      void import('@tauri-apps/api/webviewWindow').then(async ({ getCurrentWebviewWindow }) => {
+        const unlistenDrop = await getCurrentWebviewWindow().onDragDropEvent((event) => {
+          if (event.payload.type !== 'drop') return;
+          for (const path of event.payload.paths) void openWorkspaceFile(path);
+        });
+        const previousUnlisten = unlisten;
+        unlisten = () => {
+          previousUnlisten?.();
+          unlistenDrop();
+        };
+      });
+    }
+    return () => {
+      window.removeEventListener('keydown', onKeydown);
+      if (pollTimer) clearInterval(pollTimer);
+      unlisten?.();
+    };
   });
 
   function createTab(name = 'Untitled.md', content = '', path: string | null = null): DocumentTab {
-    return { id: crypto.randomUUID(), name, path, content, savedContent: content };
+    return {
+      id: crypto.randomUUID(),
+      name,
+      path,
+      content,
+      savedContent: content,
+      fingerprint: null,
+      conflict: false,
+      recovered: false,
+      selection: { anchor: 0, head: 0 },
+    };
   }
 
   function updateContent(content: string) {
     tabs = tabs.map((tab) => (tab.id === activeId ? { ...tab, content } : tab));
+    schedulePersistence();
+  }
+
+  function updateSelection(selection: { anchor: number; head: number }) {
+    tabs = tabs.map((tab) => (tab.id === activeId ? { ...tab, selection } : tab));
   }
 
   function newDocument() {
@@ -102,10 +190,15 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       activeId = existing.id;
       return;
     }
-    const tab = createTab(document.name, document.content, document.path);
+    const tab = {
+      ...createTab(document.name, document.content, document.path),
+      fingerprint: document.fingerprint,
+    };
     tabs = [...tabs, tab];
     activeId = tab.id;
     status = `Opened ${document.name}`;
+    recentFiles = remember(recentFiles, document.path);
+    schedulePersistence();
   }
 
   async function openFile() {
@@ -133,6 +226,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       workspaceFiles = workspace.entries;
       sidebarOpen = true;
       status = `${workspace.entries.length} Markdown files found`;
+      recentWorkspaces = remember(recentWorkspaces, workspace.root);
+      schedulePersistence();
     } catch (error) {
       status = readableError(error);
     }
@@ -156,18 +251,43 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       const path =
         saveAs || !activeTab.path ? await chooseSavePath(activeTab.path) : activeTab.path;
       if (!path) return;
-      await writeDocument(path, activeTab.content);
+      const fingerprint = await writeDocument(
+        path,
+        activeTab.content,
+        activeTab.fingerprint,
+        false
+      );
       const name = path.split(/[\\/]/).at(-1) ?? activeTab.name;
       tabs = tabs.map((tab) =>
-        tab.id === activeId ? { ...tab, path, name, savedContent: tab.content } : tab
+        tab.id === activeId
+          ? { ...tab, path, name, savedContent: tab.content, fingerprint, conflict: false }
+          : tab
       );
       status = `Saved ${name}`;
+      recentFiles = remember(recentFiles, path);
+      schedulePersistence();
     } catch (error) {
-      status = readableError(error);
+      if (readableError(error).includes('changed on disk')) {
+        tabs = tabs.map((tab) => (tab.id === activeId ? { ...tab, conflict: true } : tab));
+        conflictTabId = activeId;
+        conflictOpen = true;
+        status = 'Save paused: file changed outside Tuxedo MD';
+      } else status = readableError(error);
     }
   }
 
   function closeTab(id: string) {
+    const tab = tabs.find((candidate) => candidate.id === id);
+    if (tab && tab.content !== tab.savedContent && !settings.keepDraftsSilently) {
+      const discard = confirm(
+        `Discard the unsaved draft for ${tab.name}?\nChoose Cancel to keep it available when Tuxedo MD reopens.`
+      );
+      if (discard) void deleteState(`draft-${id}`);
+      else void saveState(`draft-${id}`, tab);
+    }
+    if (tab && (settings.keepDraftsSilently || tab.content !== tab.savedContent)) {
+      void saveState(`draft-${id}`, tab);
+    }
     if (tabs.length === 1) {
       const replacement = createTab();
       tabs = [replacement];
@@ -177,6 +297,128 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     const index = tabs.findIndex((tab) => tab.id === id);
     tabs = tabs.filter((tab) => tab.id !== id);
     if (activeId === id) activeId = tabs[Math.max(0, index - 1)].id;
+  }
+
+  function schedulePersistence() {
+    if (recoveryTimer) clearTimeout(recoveryTimer);
+    recoveryTimer = setTimeout(() => void persistSession(), 500);
+    const tab = activeTab;
+    if (!settings.autosave || !tab?.path || tab.conflict || tab.content === tab.savedContent)
+      return;
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    autosaveTimer = setTimeout(() => void saveActive(false), settings.autosaveDelayMs);
+  }
+
+  async function persistSession() {
+    try {
+      await saveState('settings', settings);
+      const session: SessionState = {
+        version: 1,
+        activeId,
+        mode,
+        workspaceRoot,
+        tabs,
+        recentFiles,
+        recentWorkspaces,
+      };
+      await saveState('session', session);
+      for (const tab of tabs.filter(
+        (item) => !item.path || item.content !== item.savedContent || item.conflict
+      )) {
+        await saveState(`draft-${tab.id}`, tab);
+      }
+    } catch {
+      /* Browser preview has no native state store. */
+    }
+  }
+
+  async function restoreState() {
+    if (!isDesktop()) return;
+    try {
+      const loadedSettings = await loadState<AppSettings>('settings');
+      if (loadedSettings?.version === 1) settings = { ...defaultSettings, ...loadedSettings };
+      const session = await loadState<SessionState>('session');
+      if (!session || session.version !== 1 || !settings.restoreSession || !session.tabs.length)
+        return;
+      tabs = session.tabs;
+      activeId =
+        session.activeId && session.tabs.some((tab) => tab.id === session.activeId)
+          ? session.activeId
+          : session.tabs[0].id;
+      mode = session.mode;
+      workspaceRoot = session.workspaceRoot;
+      recentFiles = session.recentFiles ?? [];
+      recentWorkspaces = session.recentWorkspaces ?? [];
+      status = 'Session restored';
+    } catch {
+      status = 'Started fresh: saved session could not be restored';
+    }
+  }
+
+  async function checkExternalChanges() {
+    if (!isDesktop()) return;
+    for (const tab of tabs.filter((item) => item.path && !item.conflict)) {
+      try {
+        const disk = await probeDocument(tab.path!);
+        if (disk.fingerprint.hash === tab.fingerprint?.hash) continue;
+        if (tab.content === tab.savedContent) {
+          tabs = tabs.map((item) =>
+            item.id === tab.id
+              ? {
+                  ...item,
+                  content: disk.content,
+                  savedContent: disk.content,
+                  fingerprint: disk.fingerprint,
+                }
+              : item
+          );
+          status = `${tab.name} reloaded from disk`;
+        } else {
+          tabs = tabs.map((item) => (item.id === tab.id ? { ...item, conflict: true } : item));
+          conflictTabId = tab.id;
+          conflictOpen = true;
+        }
+      } catch {
+        /* Deleted/unavailable files remain recoverable drafts. */
+      }
+    }
+  }
+
+  async function resolveConflict(action: 'reload' | 'keep') {
+    const tab = tabs.find((item) => item.id === conflictTabId);
+    if (!tab?.path) return;
+    try {
+      if (action === 'reload') {
+        const disk = await probeDocument(tab.path);
+        tabs = tabs.map((item) =>
+          item.id === tab.id
+            ? {
+                ...item,
+                content: disk.content,
+                savedContent: disk.content,
+                fingerprint: disk.fingerprint,
+                conflict: false,
+              }
+            : item
+        );
+      } else {
+        const fingerprint = await writeDocument(tab.path, tab.content, tab.fingerprint, true);
+        tabs = tabs.map((item) =>
+          item.id === tab.id
+            ? { ...item, savedContent: item.content, fingerprint, conflict: false }
+            : item
+        );
+      }
+      conflictOpen = false;
+      conflictTabId = null;
+      schedulePersistence();
+    } catch (error) {
+      status = readableError(error);
+    }
+  }
+
+  function remember(items: string[], value: string) {
+    return [value, ...items.filter((item) => item !== value)].slice(0, 20);
   }
 
   function readableError(error: unknown): string {
@@ -210,7 +452,12 @@ Try editing this document, or open a Markdown file from the toolbar.`;
           ><Sparkles /></button
         >
       </div>
-      <button class="icon-button" title="Settings"><Settings2 /></button>
+      <button class="icon-button" title="Settings" onclick={() => (settingsOpen = true)}
+        ><Settings2 /></button
+      >
+      <button class="icon-button" title="Command palette" onclick={() => (paletteOpen = true)}
+        >⌘</button
+      >
     </div>
   </header>
 
@@ -238,17 +485,42 @@ Try editing this document, or open a Markdown file from the toolbar.`;
           <Search />
           <input bind:value={filter} placeholder="Filter files" />
         </label>
-        <nav class="file-list" aria-label="Workspace files">
-          {#each filteredFiles as file (file.path)}
-            <button onclick={() => openWorkspaceFile(file.path)} title={file.relativePath}>
-              <span>{file.name}</span><small>{file.relativePath}</small>
-            </button>
-          {:else}
-            <p class="empty-state">
-              {workspaceRoot ? 'No matching Markdown files.' : 'Open a folder to begin.'}
-            </p>
-          {/each}
-        </nav>
+        <button class="section-toggle" onclick={() => (filesExpanded = !filesExpanded)}
+          >Files <span>{filesExpanded ? '−' : '+'}</span></button
+        >
+        {#if filesExpanded}<nav class="file-list" aria-label="Workspace files">
+            {#each filteredFiles as file (file.path)}
+              <button onclick={() => openWorkspaceFile(file.path)} title={file.relativePath}>
+                <span>{file.name}</span><small>{file.relativePath}</small>
+              </button>
+            {:else}
+              <p class="empty-state">
+                {workspaceRoot ? 'No matching Markdown files.' : 'Open a folder to begin.'}
+              </p>
+            {/each}
+          </nav>{/if}
+        <button class="section-toggle" onclick={() => (outlineExpanded = !outlineExpanded)}
+          >Outline <span>{outlineExpanded ? '−' : '+'}</span></button
+        >
+        {#if outlineExpanded}<nav class="outline-list" aria-label="Document outline">
+            {#each outline as item (item.line)}
+              <button
+                style={`--outline-level:${item.level}`}
+                onclick={() => {
+                  status = `Heading: ${item.title}`;
+                }}
+                title={`Line ${item.line}`}>{item.title}</button
+              >
+            {:else}<p class="empty-state">No headings in this document.</p>{/each}
+          </nav>{/if}
+        <button class="section-toggle" onclick={() => (recentExpanded = !recentExpanded)}
+          >Recent <span>{recentExpanded ? '−' : '+'}</span></button
+        >
+        {#if recentExpanded}<nav class="outline-list" aria-label="Recent files">
+            {#each recentFiles as path (path)}<button onclick={() => openWorkspaceFile(path)}
+                >{path.split(/[\\/]/).at(-1)}</button
+              >{:else}<p class="empty-state">No recent files yet.</p>{/each}
+          </nav>{/if}
         <div class="sidebar-upgrade">
           <Sparkles />
           <div>
@@ -291,9 +563,14 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         class="editor-grid"
       >
         {#if mode !== 'preview'}
-          <div class="source-pane">
+          <div class:nowrap={!settings.lineWrap} class="source-pane">
             <div class="pane-label">Markdown</div>
-            <MarkdownEditor value={activeTab?.content ?? ''} onchange={updateContent} />
+            <MarkdownEditor
+              documentId={activeTab?.id ?? 'empty'}
+              value={activeTab?.content ?? ''}
+              onchange={updateContent}
+              onselectionchange={updateSelection}
+            />
           </div>
         {/if}
         {#if mode !== 'source'}
@@ -317,3 +594,119 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     </main>
   </div>
 </div>
+
+{#if settingsOpen}
+  <div
+    class="modal-backdrop"
+    role="presentation"
+    onclick={(event) => {
+      if (event.target === event.currentTarget) settingsOpen = false;
+    }}
+  >
+    <dialog open class="settings-modal" aria-label="Settings">
+      <header>
+        <h2>Settings</h2>
+        <button class="icon-button" onclick={() => (settingsOpen = false)}><X /></button>
+      </header>
+      <label
+        >Theme <select bind:value={settings.theme}
+          ><option value="system">System</option><option value="dark">Dark</option><option
+            value="light">Light</option
+          ><option value="contrast">High contrast</option></select
+        ></label
+      >
+      <label
+        >Glass effects <select bind:value={settings.glassEffects}
+          ><option value="system">Follow system</option><option value="on">Always on</option><option
+            value="off">Off</option
+          ></select
+        ></label
+      >
+      <label
+        >Editor font size <input type="range" min="12" max="22" bind:value={settings.fontSize} />
+        {settings.fontSize}px</label
+      >
+      <label><input type="checkbox" bind:checked={settings.lineWrap} /> Wrap editor lines</label>
+      <label
+        ><input type="checkbox" bind:checked={settings.autosave} /> Autosave existing files</label
+      >
+      <label
+        >Autosave delay <select bind:value={settings.autosaveDelayMs}
+          ><option value={500}>0.5 seconds</option><option value={1500}>1.5 seconds</option><option
+            value={3000}>3 seconds</option
+          ></select
+        ></label
+      >
+      <label
+        ><input type="checkbox" bind:checked={settings.restoreSession} /> Restore full session</label
+      >
+      <label
+        ><input type="checkbox" bind:checked={settings.keepDraftsSilently} /> Keep untitled drafts silently
+        when closing</label
+      >
+      <p>Recovery drafts stay locally in your operating system's app-data folder.</p>
+    </dialog>
+  </div>
+{/if}
+
+{#if conflictOpen}
+  <div class="modal-backdrop">
+    <dialog open class="settings-modal" aria-label="External file conflict">
+      <h2>File changed outside Tuxedo MD</h2>
+      <p>Autosave is paused to protect both versions.</p>
+      <div class="modal-actions">
+        <button onclick={() => resolveConflict('reload')}>Reload disk version</button><button
+          class="primary"
+          onclick={() => resolveConflict('keep')}>Keep my version</button
+        >
+      </div>
+    </dialog>
+  </div>
+{/if}
+
+{#if paletteOpen}
+  <div
+    class="modal-backdrop"
+    role="presentation"
+    onclick={(event) => {
+      if (event.target === event.currentTarget) paletteOpen = false;
+    }}
+  >
+    <dialog open class="settings-modal command-palette" aria-label="Command palette">
+      <header>
+        <h2>Command palette</h2>
+        <button class="icon-button" onclick={() => (paletteOpen = false)}><X /></button>
+      </header>
+      <button
+        onclick={() => {
+          newDocument();
+          paletteOpen = false;
+        }}>New document <kbd>⌘N</kbd></button
+      >
+      <button
+        onclick={() => {
+          void openFile();
+          paletteOpen = false;
+        }}>Open file <kbd>⌘O</kbd></button
+      >
+      <button
+        onclick={() => {
+          void saveActive(false);
+          paletteOpen = false;
+        }}>Save document <kbd>⌘S</kbd></button
+      >
+      <button
+        onclick={() => {
+          settingsOpen = true;
+          paletteOpen = false;
+        }}>Open settings</button
+      >
+      <button
+        onclick={() => {
+          mode = 'split';
+          paletteOpen = false;
+        }}>Switch to split view</button
+      >
+    </dialog>
+  </div>
+{/if}

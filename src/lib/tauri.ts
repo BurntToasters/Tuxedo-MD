@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import type { FileDocument, WorkspaceEntry } from './types';
+import type { DocumentFingerprint, FileDocument, WorkspaceEntry } from './types';
 
 export function isDesktop(): boolean {
   return '__TAURI_INTERNALS__' in window;
@@ -29,8 +29,18 @@ export async function readDocument(path: string): Promise<FileDocument> {
   return invoke<FileDocument>('open_document', { path });
 }
 
-export async function writeDocument(path: string, content: string): Promise<void> {
-  await invoke('save_document', { path, content });
+export async function writeDocument(
+  path: string,
+  content: string,
+  expectedFingerprint: DocumentFingerprint | null,
+  force = false
+): Promise<DocumentFingerprint> {
+  return invoke<DocumentFingerprint>('save_document', {
+    path,
+    content,
+    expectedFingerprint,
+    force,
+  });
 }
 
 export async function chooseSavePath(defaultPath?: string | null): Promise<string | null> {
@@ -38,4 +48,21 @@ export async function chooseSavePath(defaultPath?: string | null): Promise<strin
     defaultPath: defaultPath ?? 'Untitled.md',
     filters: [{ name: 'Markdown', extensions: ['md'] }],
   });
+}
+
+export async function probeDocument(path: string): Promise<FileDocument> {
+  return invoke<FileDocument>('probe_document', { path });
+}
+
+export async function loadState<T>(key: string): Promise<T | null> {
+  const content = await invoke<string | null>('load_app_state', { key });
+  return content ? (JSON.parse(content) as T) : null;
+}
+
+export async function saveState(key: string, value: unknown): Promise<void> {
+  await invoke('save_app_state', { key, content: JSON.stringify(value) });
+}
+
+export async function deleteState(key: string): Promise<void> {
+  await invoke('delete_app_state', { key });
 }

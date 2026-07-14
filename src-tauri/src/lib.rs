@@ -1,9 +1,10 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
 };
+use tauri::{AppHandle, Emitter, Manager};
 use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
 
@@ -20,6 +21,12 @@ enum AppError {
     NotADirectory,
     #[error("The workspace contains more than 20,000 Markdown files")]
     WorkspaceTooLarge,
+    #[error("The file changed on disk before it could be saved")]
+    Conflict,
+    #[error("Invalid application state key")]
+    InvalidStateKey,
+    #[error("Application state path error: {0}")]
+    StatePath(String),
     #[error("{0}")]
     Io(#[from] std::io::Error),
     #[error("{0}")]
@@ -41,6 +48,15 @@ struct FileDocument {
     path: String,
     name: String,
     content: String,
+    fingerprint: DocumentFingerprint,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct DocumentFingerprint {
+    modified_ms: u128,
+    size: u64,
+    hash: String,
 }
 
 #[derive(Serialize)]
@@ -59,8 +75,8 @@ struct BuildInfo {
 }
 
 #[tauri::command]
-fn open_document(path: PathBuf) -> Result<FileDocument, AppError> {
-    let metadata = fs::metadata(&path)?;
+fn read_document(path: &Path) -> Result<FileDocument, AppError> {
+    let metadata = fs::metadata(path)?;
     if !metadata.is_file() {
         return Err(AppError::NotAFile);
     }
@@ -68,7 +84,7 @@ fn open_document(path: PathBuf) -> Result<FileDocument, AppError> {
         return Err(AppError::FileTooLarge);
     }
 
-    let content = fs::read_to_string(&path)?;
+    let content = fs::read_to_string(path)?;
     Ok(FileDocument {
         name: path
             .file_name()
@@ -77,11 +93,35 @@ fn open_document(path: PathBuf) -> Result<FileDocument, AppError> {
             .to_owned(),
         path: path.to_string_lossy().into_owned(),
         content,
+        fingerprint: fingerprint(path, &metadata)?,
     })
 }
 
 #[tauri::command]
-fn save_document(path: PathBuf, content: String) -> Result<(), AppError> {
+fn open_document(path: PathBuf) -> Result<FileDocument, AppError> {
+    read_document(&path)
+}
+
+fn fingerprint(path: &Path, metadata: &fs::Metadata) -> Result<DocumentFingerprint, AppError> {
+    let modified_ms = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    Ok(DocumentFingerprint {
+        modified_ms,
+        size: metadata.len(),
+        hash: blake3::hash(&fs::read(path)?).to_hex().to_string(),
+    })
+}
+
+#[tauri::command]
+fn save_document(
+    path: PathBuf,
+    content: String,
+    expected_fingerprint: Option<DocumentFingerprint>,
+    force: bool,
+) -> Result<DocumentFingerprint, AppError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 
@@ -90,6 +130,15 @@ fn save_document(path: PathBuf, content: String) -> Result<(), AppError> {
         .and_then(|name| name.to_str())
         .unwrap_or("document.md");
     let temporary = parent.join(format!(".{file_name}.tuxedo-tmp"));
+
+    if !force {
+        if let (Some(expected), Ok(metadata)) = (&expected_fingerprint, fs::metadata(&path)) {
+            let actual = fingerprint(&path, &metadata)?;
+            if actual != *expected {
+                return Err(AppError::Conflict);
+            }
+        }
+    }
 
     let result = (|| -> Result<(), std::io::Error> {
         let mut file = fs::File::create(&temporary)?;
@@ -106,7 +155,72 @@ fn save_document(path: PathBuf, content: String) -> Result<(), AppError> {
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
     }
-    result.map_err(AppError::from)
+    result.map_err(AppError::from)?;
+    let metadata = fs::metadata(&path)?;
+    fingerprint(&path, &metadata)
+}
+
+#[tauri::command]
+fn probe_document(path: PathBuf) -> Result<FileDocument, AppError> {
+    read_document(&path)
+}
+
+fn state_file(app: &AppHandle, key: &str) -> Result<PathBuf, AppError> {
+    if !key
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err(AppError::InvalidStateKey);
+    }
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| AppError::StatePath(error.to_string()))?;
+    Ok(directory.join("state").join(format!("{key}.json")))
+}
+
+#[tauri::command]
+fn load_app_state(app: AppHandle, key: String) -> Result<Option<String>, AppError> {
+    let path = state_file(&app, &key)?;
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[tauri::command]
+fn save_app_state(app: AppHandle, key: String, content: String) -> Result<(), AppError> {
+    let path = state_file(&app, &key)?;
+    write_replacement(&path, content.as_bytes())
+}
+
+#[tauri::command]
+fn delete_app_state(app: AppHandle, key: String) -> Result<(), AppError> {
+    let path = state_file(&app, &key)?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_replacement(path: &Path, content: &[u8]) -> Result<(), AppError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(
+        ".{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    let mut file = fs::File::create(&temporary)?;
+    file.write_all(content)?;
+    file.sync_all()?;
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    fs::rename(&temporary, path)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -172,17 +286,74 @@ fn get_build_info() -> BuildInfo {
     }
 }
 
+fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let handle = app.handle();
+    let file = Submenu::with_items(
+        handle,
+        "File",
+        true,
+        &[
+            &MenuItem::with_id(
+                handle,
+                "new-document",
+                "New Document",
+                true,
+                Some("CmdOrCtrl+N"),
+            )?,
+            &MenuItem::with_id(handle, "open-document", "Open…", true, Some("CmdOrCtrl+O"))?,
+            &MenuItem::with_id(handle, "save-document", "Save", true, Some("CmdOrCtrl+S"))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::quit(handle, None)?,
+        ],
+    )?;
+    let edit = Submenu::with_items(
+        handle,
+        "Edit",
+        true,
+        &[
+            &MenuItem::with_id(handle, "find", "Find", true, Some("CmdOrCtrl+F"))?,
+            &MenuItem::with_id(
+                handle,
+                "command-palette",
+                "Command Palette",
+                true,
+                Some("CmdOrCtrl+Shift+P"),
+            )?,
+        ],
+    )?;
+    let view = Submenu::with_items(
+        handle,
+        "View",
+        true,
+        &[
+            &MenuItem::with_id(handle, "split-view", "Split View", true, None::<&str>)?,
+            &MenuItem::with_id(handle, "settings", "Settings", true, Some("CmdOrCtrl+,"))?,
+        ],
+    )?;
+    app.set_menu(Menu::with_items(handle, &[&file, &edit, &view])?)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| Ok(setup_native_menu(app)?))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             open_document,
             save_document,
             scan_workspace,
-            get_build_info
+            probe_document,
+            get_build_info,
+            load_app_state,
+            save_app_state,
+            delete_app_state
         ])
+        .on_menu_event(|app, event| {
+            let _ = app.emit("native-menu-command", event.id().as_ref().to_string());
+        })
         .run(tauri::generate_context!())
         .expect("error while running Tuxedo MD");
 }
