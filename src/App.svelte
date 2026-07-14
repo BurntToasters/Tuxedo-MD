@@ -13,7 +13,7 @@
   } from '@lucide/svelte';
   import { onMount } from 'svelte';
   import MarkdownEditor from './lib/editor/MarkdownEditor.svelte';
-  import { editionLabel, isFullEdition } from './lib/edition';
+  import { isFullEdition } from './lib/edition';
   import { renderMarkdown } from './lib/preview';
   import {
     chooseDocument,
@@ -29,6 +29,7 @@
     takePendingOpenPaths,
   } from './lib/tauri';
   import { applyNativeWindowEffects, resizeWindowForDrawer } from './lib/window';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
     defaultSettings,
     type AppSettings,
@@ -463,16 +464,56 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   function readableError(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
   }
+
+  function handleDrag(e: MouseEvent) {
+    if (
+      e.button === 0 &&
+      e.target instanceof Element &&
+      e.target.closest('[data-tauri-drag-region]') &&
+      !e.target.closest('button, input, [data-tauri-no-drag]') &&
+      isDesktop()
+    ) {
+      try {
+        void getCurrentWindow().startDragging();
+      } catch {
+        // Ignore errors if Tauri API fails
+      }
+    }
+  }
 </script>
 
 <svelte:head><title>Tuxedo MD</title></svelte:head>
+<svelte:window onmousedown={handleDrag} />
 
 <div class="app-shell">
   <header class:mac-titlebar={isMacPlatform} class="titlebar" data-tauri-drag-region>
     <div class="brand" data-tauri-drag-region>
       <div class="brand-mark"><BookOpenText size={18} /></div>
-      <span>Tuxedo MD</span>
-      <span class:pro={isFullEdition} class="edition">{editionLabel}</span>
+      {#if !isMacPlatform}
+        <span>Tuxedo MD</span>
+      {/if}
+      <span class:pro={isFullEdition} class="edition">{isFullEdition ? 'PRO' : 'CE'}</span>
+    </div>
+
+    <div class="titlebar-tabs" data-tauri-drag-region>
+      {#each tabs as tab (tab.id)}
+        <div class:active={tab.id === activeId} class="titlebar-tab">
+          <button class="tab-select" onclick={() => (activeId = tab.id)}>
+            <span class:dirty={tab.content !== tab.savedContent}>{tab.name}</span>
+          </button>
+          {#if tabs.length > 1}
+            <button
+              class="tab-close"
+              title={`Close ${tab.name}`}
+              onclick={(event) => {
+                event.stopPropagation();
+                closeTab(tab.id);
+              }}><X /></button
+            >
+          {/if}
+        </div>
+      {/each}
+      <button class="titlebar-new-tab" onclick={newDocument} title="New tab">+</button>
     </div>
 
     <div class="toolbar">
@@ -487,6 +528,18 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       <button class="icon-button" title="New document" onclick={newDocument}><FilePlus2 /></button>
       <button class="icon-button" title="Open file" onclick={openFile}><FolderOpen /></button>
       <button class="icon-button" title="Save" onclick={() => saveActive(false)}><Save /></button>
+      <span class="toolbar-divider"></span>
+      <div class="titlebar-mode-toggle" aria-label="Editor mode">
+        <button class:active={mode === 'source'} onclick={() => (mode = 'source')} title="Editor"
+          >Editor</button
+        >
+        <button class:active={mode === 'split'} onclick={() => (mode = 'split')} title="Split view"
+          >Split</button
+        >
+        <button class:active={mode === 'preview'} onclick={() => (mode = 'preview')} title="Preview"
+          >Preview</button
+        >
+      </div>
       <span class="toolbar-divider"></span>
       <button class="icon-button" title="Settings" onclick={() => (settingsOpen = true)}
         ><Settings2 /></button
@@ -576,37 +629,9 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     {/if}
 
     <main class="main-area">
-      {#if tabs.length > 1}<div class="tabs">
-          {#each tabs as tab (tab.id)}
-            <div class:active={tab.id === activeId} class="tab">
-              <button class="tab-select" onclick={() => (activeId = tab.id)}>
-                <span class:dirty={tab.content !== tab.savedContent}>{tab.name}</span>
-              </button>
-              <button
-                class="tab-close"
-                title={`Close ${tab.name}`}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  closeTab(tab.id);
-                }}><X /></button
-              >
-            </div>
-          {/each}
-          <button class="new-tab" onclick={newDocument} title="New tab">+</button>
-        </div>{/if}
-
       <section class:split-layout={mode === 'split'} class="editor-grid">
         {#if mode !== 'preview'}
           <div class:nowrap={!settings.lineWrap} class="source-pane">
-            <div class="pane-label">
-              <span>Markdown</span>
-              <div class="document-view-toggle" aria-label="Document view">
-                <button class:active={mode === 'source'} onclick={() => (mode = 'source')}
-                  >Editor</button
-                >
-                <button onclick={() => (mode = 'preview')}>Preview</button>
-              </div>
-            </div>
             <MarkdownEditor
               documentId={activeTab?.id ?? 'empty'}
               value={activeTab?.content ?? ''}
@@ -617,15 +642,6 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         {/if}
         {#if mode !== 'source'}
           <article class="preview-pane">
-            <div class="pane-label">
-              <span>Preview</span>
-              <div class="document-view-toggle" aria-label="Document view">
-                <button onclick={() => (mode = 'source')}>Editor</button>
-                <button class:active={mode === 'preview'} onclick={() => (mode = 'preview')}
-                  >Preview</button
-                >
-              </div>
-            </div>
             <!-- Preview HTML is produced by rehype-sanitize in src/lib/preview.ts. -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
             <div class="markdown-body">{@html preview}</div>
