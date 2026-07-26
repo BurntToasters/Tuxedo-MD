@@ -2,6 +2,7 @@ node_modules/
 dist/
 coverage/
 coverage-headless/
+coverage/.release-quality.json
 release/
 msstore/
 flatpak-repo/

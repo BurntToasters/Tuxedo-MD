@@ -22,7 +22,7 @@
     indentUnit,
   } from '@codemirror/language';
   import { history, defaultKeymap, historyKeymap, indentWithTab } from '@codemirror/commands';
-  import { searchKeymap, highlightSelectionMatches } from '@codemirror/search';
+  import { searchKeymap, highlightSelectionMatches, openSearchPanel } from '@codemirror/search';
   import {
     autocompletion,
     completionKeymap,
@@ -50,6 +50,7 @@
     showLineNumbers = true,
     tabSize = 4,
     spellcheck = false,
+    findRequest = 0,
     onchange,
     onselectionchange,
   }: {
@@ -58,6 +59,7 @@
     showLineNumbers?: boolean;
     tabSize?: number;
     spellcheck?: boolean;
+    findRequest?: number;
     onchange: (value: string) => void;
     onselectionchange: (selection: { anchor: number; head: number }) => void;
   } = $props();
@@ -69,6 +71,7 @@
   let lastSln: boolean | undefined = undefined;
   let lastTs: number | undefined = undefined;
   let lastSc: boolean | undefined = undefined;
+  let lastFindRequest = 0;
 
   function createState(content: string, selection?: any) {
     const ext = [
@@ -238,6 +241,12 @@
     if (value === localValue) return;
     localValue = value;
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
+  });
+
+  $effect(() => {
+    if (!view || findRequest === lastFindRequest) return;
+    lastFindRequest = findRequest;
+    if (findRequest > 0) openSearchPanel(view);
   });
 </script>
 

@@ -4,6 +4,7 @@
     "macOSPrivateApi": false,
     "windows": [
       {
+        "label": "main",
         "title": "Tuxedo MD",
         "width": 980,
         "height": 780,
@@ -13,7 +14,7 @@
         "decorations": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 18, "y": 18 }
+        "trafficLightPosition": { "x": 16, "y": 16 }
       }
     ]
   },

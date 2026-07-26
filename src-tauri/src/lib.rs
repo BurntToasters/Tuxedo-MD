@@ -337,71 +337,110 @@ fn take_pending_open_paths(state: tauri::State<PendingOpenPaths>) -> Vec<String>
 }
 
 fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
-    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-    let handle = app.handle();
-    let file = Submenu::with_items(
-        handle,
-        "File",
-        true,
-        &[
-            &MenuItem::with_id(
-                handle,
-                "new-document",
-                "New Document",
-                true,
-                Some("CmdOrCtrl+N"),
-            )?,
-            &MenuItem::with_id(handle, "open-document", "Open…", true, Some("CmdOrCtrl+O"))?,
-            &MenuItem::with_id(handle, "save-document", "Save", true, Some("CmdOrCtrl+S"))?,
-            &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::quit(handle, None)?,
-        ],
-    )?;
-    let edit = Submenu::with_items(
-        handle,
-        "Edit",
-        true,
-        &[
-            &MenuItem::with_id(handle, "find", "Find", true, Some("CmdOrCtrl+F"))?,
-            &MenuItem::with_id(
-                handle,
-                "command-palette",
-                "Command Palette",
-                true,
-                Some("CmdOrCtrl+Shift+P"),
-            )?,
-        ],
-    )?;
-    let view = Submenu::with_items(
-        handle,
-        "View",
-        true,
-        &[
-            &MenuItem::with_id(
-                handle,
-                "toggle-sidebar",
-                "Toggle Tools",
-                true,
-                Some("CmdOrCtrl+Shift+B"),
-            )?,
-            &MenuItem::with_id(
-                handle,
-                "editor-view",
-                "Editor",
-                true,
-                Some("CmdOrCtrl+Shift+E"),
-            )?,
-            &MenuItem::with_id(
-                handle,
-                "preview-view",
-                "Preview",
-                true,
-                Some("CmdOrCtrl+Shift+V"),
-            )?,
-            &MenuItem::with_id(handle, "settings", "Settings", true, Some("CmdOrCtrl+,"))?,
-        ],
-    )?;
-    app.set_menu(Menu::with_items(handle, &[&file, &edit, &view])?)?;
+    #[cfg(target_os = "windows")]
+    let _ = app;
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+        let handle = app.handle();
+        let file = Submenu::with_items(
+            handle,
+            "File",
+            true,
+            &[
+                &MenuItem::with_id(
+                    handle,
+                    "new-document",
+                    "New Document",
+                    true,
+                    Some("CmdOrCtrl+N"),
+                )?,
+                &MenuItem::with_id(handle, "open-document", "Open…", true, Some("CmdOrCtrl+O"))?,
+                &MenuItem::with_id(handle, "save-document", "Save", true, Some("CmdOrCtrl+S"))?,
+                &MenuItem::with_id(
+                    handle,
+                    "save-document-as",
+                    "Save As…",
+                    true,
+                    Some("CmdOrCtrl+Shift+S"),
+                )?,
+                &PredefinedMenuItem::separator(handle)?,
+                &PredefinedMenuItem::quit(handle, None)?,
+            ],
+        )?;
+        let edit = Submenu::with_items(
+            handle,
+            "Edit",
+            true,
+            &[
+                &MenuItem::with_id(handle, "find", "Find", true, Some("CmdOrCtrl+F"))?,
+                &MenuItem::with_id(
+                    handle,
+                    "command-palette",
+                    "Command Palette",
+                    true,
+                    Some("CmdOrCtrl+Shift+P"),
+                )?,
+            ],
+        )?;
+        let view = Submenu::with_items(
+            handle,
+            "View",
+            true,
+            &[
+                &MenuItem::with_id(
+                    handle,
+                    "toggle-sidebar",
+                    "Toggle Tools",
+                    true,
+                    Some("CmdOrCtrl+Shift+B"),
+                )?,
+                &MenuItem::with_id(
+                    handle,
+                    "editor-view",
+                    "Editor",
+                    true,
+                    Some("CmdOrCtrl+Shift+E"),
+                )?,
+                &MenuItem::with_id(
+                    handle,
+                    "split-view",
+                    "Split",
+                    true,
+                    Some("CmdOrCtrl+Shift+D"),
+                )?,
+                &MenuItem::with_id(
+                    handle,
+                    "preview-view",
+                    "Preview",
+                    true,
+                    Some("CmdOrCtrl+Shift+V"),
+                )?,
+                &MenuItem::with_id(handle, "settings", "Settings", true, Some("CmdOrCtrl+,"))?,
+            ],
+        )?;
+        app.set_menu(Menu::with_items(handle, &[&file, &edit, &view])?)?;
+    }
+    Ok(())
+}
+
+fn setup_window_chrome(app: &tauri::App) -> tauri::Result<()> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        window.set_decorations(false)?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use tauri::TitleBarStyle;
+        window.set_title_bar_style(TitleBarStyle::Overlay)?;
+    }
+
     Ok(())
 }
 
@@ -487,6 +526,30 @@ fn get_licenses(app: tauri::AppHandle) -> Result<String, String> {
         .map_err(|e| format!("Failed to encode merged licenses payload: {e}"))
 }
 
+#[tauri::command]
+fn set_document_edited(window: tauri::WebviewWindow, edited: bool) -> Result<(), String> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, edited);
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::msg_send;
+        use objc2::runtime::AnyObject;
+        let ptr = window.ns_window().map_err(|e| e.to_string())?;
+        if ptr.is_null() {
+            return Err("NSWindow pointer is null".into());
+        }
+        unsafe {
+            let ns_window = ptr.cast::<AnyObject>();
+            let _: () = msg_send![ns_window, setDocumentEdited: edited];
+        }
+        Ok(())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let pending_paths = markdown_paths(std::env::args().skip(1));
@@ -505,7 +568,11 @@ pub fn run() {
         }));
     }
     builder
-        .setup(|app| Ok(setup_native_menu(app)?))
+        .setup(|app| {
+            setup_window_chrome(app)?;
+            setup_native_menu(app)?;
+            Ok(())
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -518,7 +585,8 @@ pub fn run() {
             save_app_state,
             delete_app_state,
             take_pending_open_paths,
-            get_licenses
+            get_licenses,
+            set_document_edited
         ])
         .on_menu_event(|app, event| {
             let _ = app.emit("native-menu-command", event.id().as_ref().to_string());

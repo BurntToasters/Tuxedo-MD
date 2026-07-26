@@ -17,6 +17,7 @@
     ChevronUp,
   } from '@lucide/svelte';
   import { onMount } from 'svelte';
+  import { formatShortcut } from './lib/shortcuts';
   import MarkdownEditor from './lib/editor/MarkdownEditor.svelte';
   import { isFullEdition } from './lib/edition';
   import { renderMarkdown } from './lib/preview';
@@ -33,8 +34,18 @@
     deleteState,
     takePendingOpenPaths,
     getLicenses,
+    setDocumentEdited,
   } from './lib/tauri';
   import { applyNativeWindowEffects, resizeWindowForDrawer } from './lib/window';
+  import { detectPlatform, usesCustomTitleBar, type AppPlatform } from './lib/platform';
+  import { formatWindowTitle } from './lib/window-title';
+import {
+  requestAppClose,
+  shouldPreventClose,
+} from './lib/window-lifecycle';
+  import type { MenuCommandId } from './lib/menu-commands';
+  import WindowMenubar from './lib/chrome/WindowMenubar.svelte';
+  import WindowControls from './lib/chrome/WindowControls.svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
     defaultSettings,
@@ -66,7 +77,11 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let tabs = $state<DocumentTab[]>([initialTab]);
   let activeId = $state(initialTab.id);
   let mode = $state<EditorMode>('source');
-  let isMacPlatform = $state(false);
+  let appPlatform = $state<AppPlatform>('web');
+  let customTitleBar = $derived(usesCustomTitleBar(appPlatform));
+  let isWindowsChrome = $derived(appPlatform === 'windows');
+  let isMacChrome = $derived(appPlatform === 'macos');
+  let findRequest = $state(0);
   let preview = $state('');
   let sidebarOpen = $state(false);
   let drawerOverlay = $state(false);
@@ -127,6 +142,9 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId) ?? tabs[0]);
+  let hasUnsavedChanges = $derived(
+    tabs.some((tab) => tab.content !== tab.savedContent)
+  );
   let filteredFiles = $derived(
     workspaceFiles.filter((file) => file.relativePath.toLowerCase().includes(filter.toLowerCase()))
   );
@@ -158,8 +176,66 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     void applyNativeWindowEffects(settings.glassEffects, settings.theme !== 'light');
   });
 
+  $effect(() => {
+    const tab = activeTab;
+    const dirty = tab ? tab.content !== tab.savedContent : false;
+    const title = formatWindowTitle(tab?.name ?? 'Untitled', dirty);
+    document.title = title;
+    if (!isDesktop()) return;
+    void getCurrentWindow().setTitle(title);
+    if (appPlatform === 'macos') {
+      void setDocumentEdited(hasUnsavedChanges).catch((error) => {
+        console.error('setDocumentEdited failed', error);
+      });
+    }
+  });
+
+  function runMenuCommand(id: MenuCommandId | string) {
+    switch (id) {
+      case 'new-document':
+        newDocument();
+        break;
+      case 'open-document':
+        void openFile();
+        break;
+      case 'save-document':
+        void saveActive(false);
+        break;
+      case 'save-document-as':
+        void saveActive(true);
+        break;
+      case 'quit':
+        if (isDesktop()) void requestAppClose(hasUnsavedChanges);
+        break;
+      case 'find':
+        findRequest += 1;
+        break;
+      case 'command-palette':
+        paletteOpen = true;
+        break;
+      case 'settings':
+        settingsOpen = true;
+        break;
+      case 'editor-view':
+        mode = 'source';
+        break;
+      case 'split-view':
+        mode = 'split';
+        break;
+      case 'preview-view':
+        mode = 'preview';
+        break;
+      case 'toggle-sidebar':
+        void setSidebarOpen(!sidebarOpen);
+        break;
+      default:
+        break;
+    }
+  }
+
   onMount(() => {
-    isMacPlatform = navigator.userAgent.includes('Macintosh');
+    appPlatform = detectPlatform();
+    document.documentElement.dataset.platform = appPlatform;
     void restoreState();
     pollTimer = setInterval(() => void checkExternalChanges(), 2000);
     const onKeydown = (event: KeyboardEvent) => {
@@ -168,6 +244,11 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         return;
       }
       if (!(event.metaKey || event.ctrlKey)) return;
+      if (event.key.toLowerCase() === 'f' && !event.shiftKey) {
+        event.preventDefault();
+        findRequest += 1;
+        return;
+      }
       if (event.key.toLowerCase() === 's') {
         event.preventDefault();
         void saveActive(event.shiftKey);
@@ -183,6 +264,9 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       } else if (event.key.toLowerCase() === 'v' && event.shiftKey) {
         event.preventDefault();
         mode = 'preview';
+      } else if (event.key.toLowerCase() === 'd' && event.shiftKey) {
+        event.preventDefault();
+        mode = 'split';
       } else if (event.key.toLowerCase() === 'b' && event.shiftKey) {
         event.preventDefault();
         void setSidebarOpen(!sidebarOpen);
@@ -192,26 +276,23 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       }
     };
     window.addEventListener('keydown', onKeydown);
-    let unlisten: (() => void) | undefined;
+    const teardowns: (() => void)[] = [];
     if (isDesktop()) {
+      void getCurrentWindow()
+        .onCloseRequested((event) => {
+          if (shouldPreventClose(hasUnsavedChanges)) {
+            event.preventDefault();
+          }
+        })
+        .then((unlistenClose) => teardowns.push(unlistenClose));
       void import('@tauri-apps/api/event').then(async ({ listen }) => {
         const menuUnlisten = await listen<string>('native-menu-command', ({ payload }) => {
-          if (payload === 'new-document') newDocument();
-          else if (payload === 'open-document') void openFile();
-          else if (payload === 'save-document') void saveActive(false);
-          else if (payload === 'command-palette') paletteOpen = true;
-          else if (payload === 'settings') settingsOpen = true;
-          else if (payload === 'editor-view') mode = 'source';
-          else if (payload === 'preview-view') mode = 'preview';
-          else if (payload === 'toggle-sidebar') void setSidebarOpen(!sidebarOpen);
+          runMenuCommand(payload);
         });
         const openUnlisten = await listen<string[]>('open-paths', ({ payload }) => {
           for (const path of payload) void openWorkspaceFile(path);
         });
-        unlisten = () => {
-          menuUnlisten();
-          openUnlisten();
-        };
+        teardowns.push(menuUnlisten, openUnlisten);
         for (const path of await takePendingOpenPaths()) void openWorkspaceFile(path);
       });
       void import('@tauri-apps/api/webviewWindow').then(async ({ getCurrentWebviewWindow }) => {
@@ -219,17 +300,13 @@ Try editing this document, or open a Markdown file from the toolbar.`;
           if (event.payload.type !== 'drop') return;
           for (const path of event.payload.paths) void openWorkspaceFile(path);
         });
-        const previousUnlisten = unlisten;
-        unlisten = () => {
-          previousUnlisten?.();
-          unlistenDrop();
-        };
+        teardowns.push(unlistenDrop);
       });
     }
     return () => {
       window.removeEventListener('keydown', onKeydown);
       if (pollTimer) clearInterval(pollTimer);
-      unlisten?.();
+      for (const teardown of teardowns) teardown();
     };
   });
 
@@ -518,11 +595,14 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   function handleDrag(e: MouseEvent) {
+    if (appPlatform === 'windows') return;
     if (
       e.button === 0 &&
+      customTitleBar &&
       e.target instanceof Element &&
+      e.target.closest('.window-controls, .window-control') === null &&
       e.target.closest('[data-tauri-drag-region]') &&
-      !e.target.closest('button, input, [data-tauri-no-drag]') &&
+      !e.target.closest('button, input, select, [data-tauri-no-drag], [role="menu"]') &&
       isDesktop()
     ) {
       try {
@@ -532,22 +612,39 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       }
     }
   }
+
+  function handleTitlebarDoubleClick(event: MouseEvent) {
+    if (!customTitleBar || !isDesktop()) return;
+    if (!(event.target instanceof Element)) return;
+    if (!event.target.closest('[data-tauri-drag-region]')) return;
+    if (event.target.closest('button, input, select, [data-tauri-no-drag], [role="menu"]')) return;
+    void getCurrentWindow().toggleMaximize();
+  }
 </script>
 
 <svelte:head><title>Tuxedo MD</title></svelte:head>
-<svelte:window onmousedown={handleDrag} />
+<svelte:window onmousedown={handleDrag} ondblclick={handleTitlebarDoubleClick} />
 
-<div class="app-shell" class:focus-mode={settings.focusMode}>
-  <header class:mac-titlebar={isMacPlatform} class="titlebar" data-tauri-drag-region>
-    <div class="brand" data-tauri-drag-region>
-      <div class="brand-mark"><BookOpenText size={18} /></div>
-      {#if !isMacPlatform}
-        <span>Tuxedo MD</span>
+<div class="app-shell" class:custom-chrome={customTitleBar} class:focus-mode={settings.focusMode}>
+  <header
+    class="titlebar"
+    class:mac-titlebar={isMacChrome}
+    class:windows-chrome={isWindowsChrome}
+    data-tauri-drag-region={isWindowsChrome ? undefined : true}
+  >
+    <div class="titlebar-main" data-tauri-drag-region={isWindowsChrome ? undefined : true}>
+      {#if isWindowsChrome}
+        <WindowMenubar oncommand={runMenuCommand} />
+        <span class="titlebar-inline-divider" aria-hidden="true"></span>
+      {:else}
+        <div class="brand" data-tauri-drag-region>
+          <div class="brand-mark"><BookOpenText size={18} /></div>
+          <span>Tuxedo MD</span>
+          <span class:pro={isFullEdition} class="edition">{isFullEdition ? 'PRO' : 'CE'}</span>
+        </div>
       {/if}
-      <span class:pro={isFullEdition} class="edition">{isFullEdition ? 'PRO' : 'CE'}</span>
-    </div>
 
-    <div class="titlebar-tabs" data-tauri-drag-region>
+      <div class="titlebar-tabs" data-tauri-drag-region>
       {#each tabs as tab (tab.id)}
         <div class:active={tab.id === activeId} class="titlebar-tab">
           <button class="tab-select" onclick={() => (activeId = tab.id)}>
@@ -568,7 +665,12 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       <button class="titlebar-new-tab" onclick={newDocument} title="New tab">+</button>
     </div>
 
+    {#if isWindowsChrome}
+      <div class="titlebar-drag-fill" data-tauri-drag-region></div>
+    {/if}
+
     <div class="toolbar">
+      <div class="toolbar-quick-actions">
       <button
         class:active={sidebarOpen}
         class="icon-button"
@@ -580,7 +682,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       <button class="icon-button" title="New document" onclick={newDocument}><FilePlus2 /></button>
       <button class="icon-button" title="Open file" onclick={openFile}><FolderOpen /></button>
       <button class="icon-button" title="Save" onclick={() => saveActive(false)}><Save /></button>
-      <span class="toolbar-divider"></span>
+      </div>
+      <span class="toolbar-divider toolbar-divider-mode"></span>
       <div class="titlebar-mode-toggle" aria-label="Editor mode">
         <button class:active={mode === 'source'} onclick={() => (mode = 'source')} title="Editor"
           >Editor</button
@@ -599,6 +702,10 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       <button class="icon-button" title="Command palette" onclick={() => (paletteOpen = true)}
         >⌘</button
       >
+    </div>
+    {#if isWindowsChrome}
+      <WindowControls onclose={() => void requestAppClose(hasUnsavedChanges)} />
+    {/if}
     </div>
   </header>
 
@@ -690,6 +797,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
               showLineNumbers={settings.showLineNumbers}
               tabSize={settings.tabSize}
               spellcheck={settings.spellcheck}
+              {findRequest}
               onchange={updateContent}
               onselectionchange={updateSelection}
             />
@@ -1033,19 +1141,37 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         onclick={() => {
           newDocument();
           paletteOpen = false;
-        }}>New document <kbd>⌘N</kbd></button
+        }}>New document <kbd>{formatShortcut({ mod: true, key: 'n' })}</kbd></button
       >
       <button
         onclick={() => {
           void openFile();
           paletteOpen = false;
-        }}>Open file <kbd>⌘O</kbd></button
+        }}>Open file <kbd>{formatShortcut({ mod: true, key: 'o' })}</kbd></button
       >
       <button
         onclick={() => {
           void saveActive(false);
           paletteOpen = false;
-        }}>Save document <kbd>⌘S</kbd></button
+        }}>Save document <kbd>{formatShortcut({ mod: true, key: 's' })}</kbd></button
+      >
+      <button
+        onclick={() => {
+          void saveActive(true);
+          paletteOpen = false;
+        }}>Save as… <kbd>{formatShortcut({ mod: true, shift: true, key: 's' })}</kbd></button
+      >
+      <button
+        onclick={() => {
+          runMenuCommand('find');
+          paletteOpen = false;
+        }}>Find <kbd>{formatShortcut({ mod: true, key: 'f' })}</kbd></button
+      >
+      <button
+        onclick={() => {
+          void setSidebarOpen(!sidebarOpen);
+          paletteOpen = false;
+        }}>Toggle tools <kbd>{formatShortcut({ mod: true, shift: true, key: 'b' })}</kbd></button
       >
       <button
         onclick={() => {
@@ -1057,13 +1183,19 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         onclick={() => {
           mode = 'source';
           paletteOpen = false;
-        }}>Show editor <kbd>⌘⇧E</kbd></button
+        }}>Show editor <kbd>{formatShortcut({ mod: true, shift: true, key: 'e' })}</kbd></button
+      >
+      <button
+        onclick={() => {
+          mode = 'split';
+          paletteOpen = false;
+        }}>Split view <kbd>{formatShortcut({ mod: true, shift: true, key: 'd' })}</kbd></button
       >
       <button
         onclick={() => {
           mode = 'preview';
           paletteOpen = false;
-        }}>Show preview <kbd>⌘⇧V</kbd></button
+        }}>Show preview <kbd>{formatShortcut({ mod: true, shift: true, key: 'v' })}</kbd></button
       >
     </dialog>
   </div>

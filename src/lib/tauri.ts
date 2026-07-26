@@ -74,3 +74,7 @@ export async function takePendingOpenPaths(): Promise<string[]> {
 export async function getLicenses(): Promise<string> {
   return invoke<string>('get_licenses');
 }
+
+export async function setDocumentEdited(edited: boolean): Promise<void> {
+  await invoke('set_document_edited', { edited });
+}

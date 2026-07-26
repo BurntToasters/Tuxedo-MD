@@ -1,9 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { verifyReleaseSession } from './release-session.js';
 
 if (!process.env.GPG_KEY_ID) throw new Error('Missing GPG_KEY_ID.');
 const root = path.resolve(import.meta.dirname, '..');
+verifyReleaseSession(root);
 const target = path.join(root, 'src-tauri/target');
 const targetRoots = fs.existsSync(target)
   ? [

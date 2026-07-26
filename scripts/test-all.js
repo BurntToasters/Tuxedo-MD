@@ -1,6 +1,10 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { clearQualityGateProof, recordSuccessfulQualityGate } from './release-session.js';
 
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const checks = [
@@ -19,6 +23,7 @@ const checks = [
   ['Rust tests', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets']],
 ];
 
+clearQualityGateProof(root);
 console.log(`\nTUXEDO MD TEST SUITE · ${version}\n`);
 let failed = false;
 for (const [label, command, args] of checks) {
@@ -34,3 +39,13 @@ for (const [label, command, args] of checks) {
 
 if (failed) process.exit(1);
 console.log('✓ All checks passed.');
+const qualityGate = recordSuccessfulQualityGate(root);
+if (qualityGate.recorded) {
+  console.log('Release quality-gate proof recorded for this clean commit.');
+} else {
+  console.log('Release quality-gate proof not recorded because the working tree is dirty.');
+  if (qualityGate.dirtyFiles) {
+    console.log('Dirty files:');
+    console.log(qualityGate.dirtyFiles);
+  }
+}
