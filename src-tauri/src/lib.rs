@@ -245,8 +245,8 @@ fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
             temporary.as_ptr(),
             null(),
             REPLACEFILE_WRITE_THROUGH,
-            0,
-            0,
+            null(),
+            null(),
         )
     };
     if replaced == 0 {
