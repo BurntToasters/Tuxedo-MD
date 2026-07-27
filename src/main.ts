@@ -1,5 +1,11 @@
 import { mount } from 'svelte';
 import App from './App.svelte';
+import { initializeEdition } from './lib/edition';
 import './styles.css';
 
-mount(App, { target: document.getElementById('app')! });
+async function bootstrap() {
+  await initializeEdition();
+  mount(App, { target: document.getElementById('app')! });
+}
+
+void bootstrap();

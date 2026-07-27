@@ -47,35 +47,46 @@ export async function resizeWindowForDrawer(open: boolean): Promise<boolean> {
   }
 }
 
+export type WindowEffectState = 'native' | 'opaque';
+
 export async function applyNativeWindowEffects(
   glassEffects: 'system' | 'on' | 'off',
   dark: boolean
-): Promise<void> {
-  if (!isDesktop()) return;
+): Promise<WindowEffectState> {
+  if (!isDesktop()) return 'opaque';
 
   try {
     const { Effect, EffectState, getCurrentWindow } = await import('@tauri-apps/api/window');
     const window = getCurrentWindow();
-    if (glassEffects === 'off' || (glassEffects === 'system' && reducedTransparency())) {
+    if (glassEffects === 'off' || reducedTransparency()) {
       await window.clearEffects();
-      return;
+      return 'opaque';
     }
 
     if (navigator.userAgent.includes('Macintosh')) {
       await window.setEffects({
-        effects: [Effect.UnderWindowBackground],
+        effects: [Effect.HudWindow],
         state: EffectState.FollowsWindowActiveState,
       });
-    } else if (navigator.userAgent.includes('Windows')) {
+      return 'native';
+    }
+
+    if (navigator.userAgent.includes('Windows')) {
       try {
         await window.setEffects({ effects: [dark ? Effect.Mica : Effect.Tabbed] });
       } catch {
-        await window.setEffects({ effects: [Effect.Acrylic], color: [13, 17, 23, 205] });
+        const acrylicTint: [number, number, number, number] = dark
+          ? [30, 30, 30, 180]
+          : [245, 245, 245, 200];
+        await window.setEffects({ effects: [Effect.Acrylic], color: acrylicTint });
       }
-    } else {
-      await window.clearEffects();
+      return 'native';
     }
+
+    await window.clearEffects();
+    return 'opaque';
   } catch {
-    // Unsupported platforms retain the CSS surface treatment.
+    // Unsupported and intentionally opaque builds retain the solid CSS surface treatment.
+    return 'opaque';
   }
 }

@@ -51,6 +51,7 @@
     tabSize = 4,
     spellcheck = false,
     findRequest = 0,
+    revealRequest = null,
     onchange,
     onselectionchange,
   }: {
@@ -60,6 +61,7 @@
     tabSize?: number;
     spellcheck?: boolean;
     findRequest?: number;
+    revealRequest?: { line: number; token: number } | null;
     onchange: (value: string) => void;
     onselectionchange: (selection: { anchor: number; head: number }) => void;
   } = $props();
@@ -72,6 +74,7 @@
   let lastTs: number | undefined = undefined;
   let lastSc: boolean | undefined = undefined;
   let lastFindRequest = 0;
+  let lastRevealToken = 0;
 
   function createState(content: string, selection?: any) {
     const ext = [
@@ -247,6 +250,20 @@
     if (!view || findRequest === lastFindRequest) return;
     lastFindRequest = findRequest;
     if (findRequest > 0) openSearchPanel(view);
+  });
+
+  // Moves the cursor to a 1-based line and scrolls it into view for outline navigation.
+  $effect(() => {
+    if (!view || !revealRequest || revealRequest.token === lastRevealToken) return;
+    lastRevealToken = revealRequest.token;
+    const totalLines = view.state.doc.lines;
+    const lineNumber = Math.min(Math.max(revealRequest.line, 1), totalLines);
+    const line = view.state.doc.line(lineNumber);
+    view.dispatch({
+      selection: { anchor: line.from, head: line.from },
+      effects: EditorView.scrollIntoView(line.from, { y: 'center' }),
+    });
+    view.focus();
   });
 </script>
 

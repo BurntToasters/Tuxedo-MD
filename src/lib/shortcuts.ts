@@ -6,13 +6,8 @@ export function modKeyLabel(): string {
   return 'Ctrl';
 }
 
-export function formatShortcut(options: {
-  mod?: boolean;
-  shift?: boolean;
-  key: string;
-}): string {
-  const mac =
-    typeof navigator !== 'undefined' && navigator.userAgent.includes('Macintosh');
+export function formatShortcut(options: { mod?: boolean; shift?: boolean; key: string }): string {
+  const mac = typeof navigator !== 'undefined' && navigator.userAgent.includes('Macintosh');
   const key = options.key.length === 1 ? options.key.toUpperCase() : options.key;
   if (mac) {
     let label = '';

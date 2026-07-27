@@ -23,7 +23,9 @@ function listTauriBundleDirs(cwd) {
       if (fs.existsSync(fullPath) && fs.statSync(fullPath).isDirectory()) {
         results.push(path.relative(cwd, fullPath));
       }
-    } catch {}
+    } catch {
+      // Ignore bundle paths that disappear while cleaning or cannot be inspected.
+    }
   };
 
   addIfDir(path.join(targetRoot, 'release', 'bundle'));
@@ -37,7 +39,9 @@ function listTauriBundleDirs(cwd) {
       addIfDir(path.join(base, 'debug', 'bundle'));
       addIfDir(path.join(base, 'bundle'));
     }
-  } catch {}
+  } catch {
+    // Missing or unreadable target directories simply contain no bundle outputs.
+  }
 
   return Array.from(new Set(results));
 }
@@ -81,7 +85,7 @@ function cleanDirs(mode) {
         error && typeof error === 'object' && 'message' in error
           ? String(error.message)
           : String(error);
-      throw new Error(`Failed to clean "${relativeDir}": ${message}`);
+      throw new Error(`Failed to clean "${relativeDir}": ${message}`, { cause: error });
     }
   }
 
@@ -91,7 +95,7 @@ function cleanDirs(mode) {
     fs.writeFileSync(
       path.join(releaseDir, RELEASE_BUILD_SESSION),
       `${JSON.stringify(createReleaseSession(cwd))}\n`,
-      { flag: 'wx', mode: 0o600 },
+      { flag: 'wx', mode: 0o600 }
     );
   }
 }
@@ -108,6 +112,6 @@ if (
 }
 
 console.error(
-  'Usage: node scripts/dist-tools.js <clean|clean-release|clean-release-artifacts|clean-all>',
+  'Usage: node scripts/dist-tools.js <clean|clean-release|clean-release-artifacts|clean-all>'
 );
 process.exit(1);

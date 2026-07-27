@@ -1,4 +1,24 @@
 export type Edition = 'community' | 'full';
+
+export type EditionCapability =
+  | 'workspaceSearch'
+  | 'backlinks'
+  | 'wikiLinks'
+  | 'tags'
+  | 'mermaid'
+  | 'math'
+  | 'exportProfiles'
+  | 'themeStudio'
+  | 'documentRecipes'
+  | 'workspaceIntelligence'
+  | 'focusSessionPresets';
+
+export interface BuildInfo {
+  edition: Edition;
+  version: string;
+  capabilities: EditionCapability[];
+}
+
 export type EditorMode = 'source' | 'split' | 'preview';
 
 export interface DocumentTab {
@@ -30,6 +50,29 @@ export interface WorkspaceEntry {
   path: string;
   relativePath: string;
   name: string;
+}
+
+export interface SearchMatch {
+  path: string;
+  relativePath: string;
+  name: string;
+  /** 1-based line number of the match. */
+  line: number;
+  preview: string;
+}
+
+export interface SearchOutcome {
+  matches: SearchMatch[];
+  truncated: boolean;
+  scannedFiles: number;
+}
+
+export interface DocumentReferences {
+  path: string;
+  relativePath: string;
+  name: string;
+  links: string[];
+  tags: string[];
 }
 
 export type Theme = 'system' | 'dark' | 'light' | 'contrast';

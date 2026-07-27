@@ -67,7 +67,7 @@ function validateIdentity(record, expected, label) {
 function validateReleaseSession(
   session,
   expected,
-  { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS } = {},
+  { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS } = {}
 ) {
   if (!session || typeof session !== 'object') {
     throw new Error('Release build session is not an object.');
@@ -93,7 +93,7 @@ function validateReleaseSession(
 function validateQualityGate(
   qualityGate,
   expected,
-  { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS } = {},
+  { now = Date.now(), maxAgeMs = DEFAULT_MAX_AGE_MS } = {}
 ) {
   if (!qualityGate || typeof qualityGate !== 'object') {
     throw new Error('Release quality-gate proof is not an object.');
@@ -122,7 +122,7 @@ function recordSuccessfulQualityGate(root = defaultRoot) {
   }
   if (status) {
     const dirtyPaths = porcelainPaths(status).filter(
-      (filePath) => !isIgnorableReleaseDirtyPath(filePath),
+      (filePath) => !isIgnorableReleaseDirtyPath(filePath)
     );
     if (dirtyPaths.length > 0) {
       return { recorded: false, dirtyFiles: status };
@@ -133,7 +133,7 @@ function recordSuccessfulQualityGate(root = defaultRoot) {
   fs.writeFileSync(
     proofPath,
     `${JSON.stringify({ ...currentReleaseIdentity(root), completedAt: Date.now() })}\n`,
-    { mode: 0o600 },
+    { mode: 0o600 }
   );
   return { recorded: true, dirtyFiles: null };
 }
@@ -146,6 +146,7 @@ function verifyQualityGate(root = defaultRoot, options) {
   } catch (error) {
     throw new Error(
       `Release quality-gate proof is missing or invalid. Run test:all first: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
   return validateQualityGate(proof, currentReleaseIdentity(root), options);
@@ -168,6 +169,7 @@ function verifyReleaseSession(root = defaultRoot, options) {
   } catch (error) {
     throw new Error(
       `Release build session is missing or invalid. Run release:prepare first: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error }
     );
   }
   return validateReleaseSession(session, currentReleaseIdentity(root), options);
@@ -182,11 +184,11 @@ if (isDirectExecution()) {
   try {
     const session = verifyReleaseSession();
     console.log(
-      `release-session: ok (${session.version}, ${session.commit.slice(0, 12)}, ${session.platform}-${session.arch})`,
+      `release-session: ok (${session.version}, ${session.commit.slice(0, 12)}, ${session.platform}-${session.arch})`
     );
   } catch (error) {
     console.error(
-      `release-session: FAILED: ${error instanceof Error ? error.message : String(error)}`,
+      `release-session: FAILED: ${error instanceof Error ? error.message : String(error)}`
     );
     process.exit(1);
   }

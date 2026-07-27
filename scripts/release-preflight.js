@@ -20,7 +20,7 @@ function expectedReleaseBranch(version) {
     return 'main';
   }
   throw new Error(
-    `Unsupported release version '${version}'; Tuxedo MD releases use alpha, beta, or stable only.`,
+    `Unsupported release version '${version}'; Tuxedo MD releases use alpha, beta, or stable only.`
   );
 }
 
@@ -38,18 +38,18 @@ function runPreflight() {
   const branch = git(['branch', '--show-current']);
   if (branch !== expectedBranch) {
     throw new Error(
-      `${version} must be released from ${expectedBranch}, not ${branch || 'detached HEAD'}.`,
+      `${version} must be released from ${expectedBranch}, not ${branch || 'detached HEAD'}.`
     );
   }
 
   const dirty = git(['status', '--porcelain=v1', '--untracked-files=all']);
   if (dirty) {
     const dirtyPaths = porcelainPaths(dirty).filter(
-      (filePath) => !isIgnorableReleaseDirtyPath(filePath),
+      (filePath) => !isIgnorableReleaseDirtyPath(filePath)
     );
     if (dirtyPaths.length > 0) {
       throw new Error(
-        `Working tree is not clean. Commit and push the exact release source first:\n${dirty}`,
+        `Working tree is not clean. Commit and push the exact release source first:\n${dirty}`
       );
     }
   }
@@ -59,7 +59,7 @@ function runPreflight() {
   const expectedUpstream = `origin/${expectedBranch}`;
   if (upstream !== expectedUpstream) {
     throw new Error(
-      `${expectedBranch} must track ${expectedUpstream}; current upstream is ${upstream}.`,
+      `${expectedBranch} must track ${expectedUpstream}; current upstream is ${upstream}.`
     );
   }
 
@@ -67,7 +67,7 @@ function runPreflight() {
   const upstreamHead = git(['rev-parse', '@{upstream}']);
   if (head !== upstreamHead) {
     throw new Error(
-      `HEAD ${head.slice(0, 12)} does not match pushed ${expectedUpstream} ${upstreamHead.slice(0, 12)}.`,
+      `HEAD ${head.slice(0, 12)} does not match pushed ${expectedUpstream} ${upstreamHead.slice(0, 12)}.`
     );
   }
 
@@ -84,7 +84,7 @@ if (isDirectExecution()) {
     runPreflight();
   } catch (error) {
     console.error(
-      `release-preflight: FAILED: ${error instanceof Error ? error.message : String(error)}`,
+      `release-preflight: FAILED: ${error instanceof Error ? error.message : String(error)}`
     );
     process.exit(1);
   }

@@ -38,6 +38,6 @@ if (!files.length) throw new Error('No release assets found.');
 execFileSync(
   process.platform === 'win32' ? 'gh.exe' : 'gh',
   ['release', 'upload', tag, '--repo', repo, '--clobber', ...files],
-  { stdio: 'inherit' },
+  { stdio: 'inherit' }
 );
 console.log(`Uploaded ${files.length} assets to ${tag}. The release remains a draft for review.`);

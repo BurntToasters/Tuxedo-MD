@@ -18,9 +18,11 @@
     const window = getCurrentWindow();
     let unlisten: (() => void) | undefined;
     void refreshMaximized();
-    void window.onResized(() => refreshMaximized()).then((fn) => {
-      unlisten = fn;
-    });
+    void window
+      .onResized(() => refreshMaximized())
+      .then((fn) => {
+        unlisten = fn;
+      });
     return () => unlisten?.();
   });
 
@@ -44,12 +46,7 @@
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
-  class="window-controls"
-  data-tauri-no-drag
-  onmousedown={stopDrag}
-  onpointerdown={stopDrag}
->
+<div class="window-controls" data-tauri-no-drag onmousedown={stopDrag} onpointerdown={stopDrag}>
   <button
     type="button"
     class="window-control"
@@ -72,7 +69,13 @@
       <Maximize2 size={10} strokeWidth={2.25} />
     {/if}
   </button>
-  <button type="button" class="window-control close" title="Close" aria-label="Close" onclick={close}>
+  <button
+    type="button"
+    class="window-control close"
+    title="Close"
+    aria-label="Close"
+    onclick={close}
+  >
     <X size={11} strokeWidth={2.25} />
   </button>
 </div>

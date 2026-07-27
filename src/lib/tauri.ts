@@ -1,6 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
-import type { DocumentFingerprint, FileDocument, WorkspaceEntry } from './types';
+import type {
+  BuildInfo,
+  DocumentFingerprint,
+  DocumentReferences,
+  EditionCapability,
+  FileDocument,
+  SearchOutcome,
+  WorkspaceEntry,
+} from './types';
 
 export function isDesktop(): boolean {
   return '__TAURI_INTERNALS__' in window;
@@ -27,6 +35,42 @@ export async function chooseWorkspace(): Promise<{
 
 export async function readDocument(path: string): Promise<FileDocument> {
   return invoke<FileDocument>('open_document', { path });
+}
+
+export async function scanWorkspace(root: string): Promise<WorkspaceEntry[]> {
+  return invoke<WorkspaceEntry[]>('scan_workspace', { root });
+}
+
+export async function searchWorkspace(
+  root: string,
+  query: string,
+  caseSensitive = false
+): Promise<SearchOutcome> {
+  return invoke<SearchOutcome>('search_workspace', { root, query, caseSensitive });
+}
+
+export async function collectWorkspaceReferences(root: string): Promise<DocumentReferences[]> {
+  return invoke<DocumentReferences[]>('collect_workspace_references', { root });
+}
+
+export async function createWorkspaceDocument(
+  root: string,
+  path: string,
+  content = ''
+): Promise<WorkspaceEntry> {
+  return invoke<WorkspaceEntry>('create_workspace_document', { root, path, content });
+}
+
+export async function renameWorkspaceDocument(
+  root: string,
+  path: string,
+  newName: string
+): Promise<WorkspaceEntry> {
+  return invoke<WorkspaceEntry>('rename_workspace_document', { root, path, newName });
+}
+
+export async function deleteWorkspaceDocument(root: string, path: string): Promise<void> {
+  await invoke('delete_workspace_document', { root, path });
 }
 
 export async function writeDocument(
@@ -69,6 +113,14 @@ export async function deleteState(key: string): Promise<void> {
 
 export async function takePendingOpenPaths(): Promise<string[]> {
   return invoke<string[]>('take_pending_open_paths');
+}
+
+export async function getBuildInfo(): Promise<BuildInfo> {
+  return invoke<BuildInfo>('get_build_info');
+}
+
+export async function authorizeCapability(capability: EditionCapability): Promise<void> {
+  await invoke('authorize_capability', { capability });
 }
 
 export async function getLicenses(): Promise<string> {

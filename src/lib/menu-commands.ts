@@ -15,14 +15,28 @@ export type MenuCommandId =
   | 'settings';
 
 export type MenuEntry =
-  | { type: 'item'; id: MenuCommandId; label: string; shortcut?: string }
-  | { type: 'separator' };
+  { type: 'item'; id: MenuCommandId; label: string; shortcut?: string } | { type: 'separator' };
 
 export function buildFileMenu(): MenuEntry[] {
   return [
-    { type: 'item', id: 'new-document', label: 'New Document', shortcut: formatShortcut({ mod: true, key: 'n' }) },
-    { type: 'item', id: 'open-document', label: 'Open…', shortcut: formatShortcut({ mod: true, key: 'o' }) },
-    { type: 'item', id: 'save-document', label: 'Save', shortcut: formatShortcut({ mod: true, key: 's' }) },
+    {
+      type: 'item',
+      id: 'new-document',
+      label: 'New Document',
+      shortcut: formatShortcut({ mod: true, key: 'n' }),
+    },
+    {
+      type: 'item',
+      id: 'open-document',
+      label: 'Open…',
+      shortcut: formatShortcut({ mod: true, key: 'o' }),
+    },
+    {
+      type: 'item',
+      id: 'save-document',
+      label: 'Save',
+      shortcut: formatShortcut({ mod: true, key: 's' }),
+    },
     {
       type: 'item',
       id: 'save-document-as',

@@ -1,9 +1,5 @@
 import fs from 'node:fs';
-import {
-  RELEASE_DIR,
-  finalizeReleaseAssets,
-  getAfterPackLocation,
-} from './release-mirror.js';
+import { RELEASE_DIR, finalizeReleaseAssets, getAfterPackLocation } from './release-mirror.js';
 
 function banner(message) {
   fs.writeSync(2, `[release:mirror] ${message}\n`);
@@ -18,7 +14,7 @@ banner(`AFTER_PACK_LOC=${JSON.stringify(getAfterPackLocation())}`);
 try {
   const result = finalizeReleaseAssets({ logger: console });
   banner(
-    `finished ok; mirrored=${result.mirrored}; copied=${result.copiedEntries}; dest=${result.destination || '(skipped)'}`,
+    `finished ok; mirrored=${result.mirrored}; copied=${result.copiedEntries}; dest=${result.destination || '(skipped)'}`
   );
   process.exit(0);
 } catch (error) {

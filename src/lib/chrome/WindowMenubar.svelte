@@ -92,7 +92,12 @@
             {#if entry.type === 'separator'}
               <div class="menubar-separator" role="separator"></div>
             {:else}
-              <button type="button" class="menubar-item" role="menuitem" onclick={() => onItem(entry)}>
+              <button
+                type="button"
+                class="menubar-item"
+                role="menuitem"
+                onclick={() => onItem(entry)}
+              >
                 <span>{entry.label}</span>
                 {#if entry.shortcut}<kbd>{entry.shortcut}</kbd>{/if}
               </button>

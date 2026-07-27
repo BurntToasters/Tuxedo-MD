@@ -105,7 +105,7 @@ export function verifyCopiedPath(sourcePath, destinationPath) {
   if (source.isFile()) {
     if (source.size !== destination.size) {
       throw new Error(
-        `mirrored file size differs: ${destinationPath} (${destination.size} bytes; expected ${source.size})`,
+        `mirrored file size differs: ${destinationPath} (${destination.size} bytes; expected ${source.size})`
       );
     }
     const sourceDigest = sha256File(sourcePath);
@@ -132,8 +132,7 @@ function copyFileForMirror(sourcePath, destinationPath) {
   try {
     fs.copyFileSync(sourcePath, destinationPath);
   } catch (error) {
-    const code =
-      error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
     if (code !== 'EPERM' && code !== 'EACCES') {
       throw error;
     }
@@ -154,7 +153,11 @@ function copyPathRecursive(sourcePath, destinationPath) {
   copyFileForMirror(sourcePath, destinationPath);
 }
 
-export function copyReleaseAssets(releaseDir = RELEASE_DIR, destination, { logger = console } = {}) {
+export function copyReleaseAssets(
+  releaseDir = RELEASE_DIR,
+  destination,
+  { logger = console } = {}
+) {
   if (!destination) {
     throw new Error('AFTER_PACK_LOC is empty');
   }
@@ -225,7 +228,7 @@ export function finalizeReleaseAssets({
   const result = run({ releaseDir, env, logger });
   if (result.mirrored) {
     logger.log(
-      `Mirrored and verified ${result.copiedEntries} cleaned release entries to: ${result.destination}`,
+      `Mirrored and verified ${result.copiedEntries} cleaned release entries to: ${result.destination}`
     );
   }
   return result;
