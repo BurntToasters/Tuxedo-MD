@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "windows": {
+      "signCommand": {
+        "cmd": "cmd.exe",
+        "args": ["/C", "scripts/windows-sign-command.cmd", "%1"]
+      }
+    }
+  }
+}

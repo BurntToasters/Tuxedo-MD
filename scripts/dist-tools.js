@@ -9,8 +9,8 @@ const RELEASE_BUILD_SESSION = '.build-session.json';
 const CLEAN_TARGETS = {
   clean: ['dist', 'coverage', 'coverage-headless'],
   'clean-release': ['release'],
-  'clean-release-artifacts': ['release', 'dist', 'msstore'],
-  'clean-all': ['dist', 'coverage', 'coverage-headless', 'release', 'msstore', 'src-tauri/target'],
+  'clean-release-artifacts': ['release', 'dist', 'msstore', 'mas'],
+  'clean-all': ['dist', 'coverage', 'coverage-headless', 'release', 'msstore', 'mas', 'src-tauri/target'],
 };
 
 function listTauriBundleDirs(cwd) {

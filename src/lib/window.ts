@@ -24,7 +24,12 @@ export async function resizeWindowForDrawer(open: boolean): Promise<boolean> {
       currentMonitor(),
     ]);
 
-    if (maximized || fullscreen || !monitor || (!open && !drawerExpandedWindow)) return false;
+    if (maximized || fullscreen) {
+      // Maximized/fullscreen skips resize; drop the flag so a later close doesn't over-shrink.
+      drawerExpandedWindow = false;
+      return false;
+    }
+    if (!monitor || (!open && !drawerExpandedWindow)) return false;
 
     const workArea = monitor.workArea;
     const targetWidth = open

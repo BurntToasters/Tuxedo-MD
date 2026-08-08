@@ -1,5 +1,11 @@
 {
   "identifier": "run.rosie.tuxedomd.pro",
+  "plugins": {
+    "updater": {
+      "active": false,
+      "endpoints": []
+    }
+  },
   "app": {
     "macOSPrivateApi": false,
     "windows": [
@@ -22,6 +28,7 @@
     "createUpdaterArtifacts": false,
     "macOS": {
       "entitlements": "Entitlements.appstore.plist",
+      "infoPlist": "Info.plist",
       "minimumSystemVersion": "12.0",
       "signingIdentity": null,
       "files": {

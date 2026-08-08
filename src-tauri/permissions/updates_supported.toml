@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-updates-supported"
+description = "Enables the updates_supported command without any pre-configured scope."
+commands.allow = ["updates_supported"]
+
+[[permission]]
+identifier = "deny-updates-supported"
+description = "Denies the updates_supported command without any pre-configured scope."
+commands.deny = ["updates_supported"]

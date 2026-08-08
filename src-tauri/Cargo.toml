@@ -18,14 +18,18 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = { version = "1", features = ["pure"] }
+# macOSPrivateApi in tauri.conf.json requires this feature present on the dependency.
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+tauri-plugin-notification = "2"
 thiserror = "2"
 walkdir = "2"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -35,7 +39,11 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [features]
 default = []
+# App Store builds pass --features mas to skip overlay private-API chrome usage.
 mas = []
+
+[dev-dependencies]
+minisign-verify = "0.2.5"
 
 [profile.release]
 codegen-units = 16

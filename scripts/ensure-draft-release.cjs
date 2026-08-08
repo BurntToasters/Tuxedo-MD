@@ -10,15 +10,27 @@ const fullRepo = `${owner}/${repo}`;
 const gh = process.platform === 'win32' ? 'gh.exe' : 'gh';
 const run = (args, stdio = 'pipe') => execFileSync(gh, args, { stdio, encoding: 'utf8' });
 
-function exists() {
+function draftStatus() {
   try {
-    run(['release', 'view', tag, '--repo', fullRepo]);
-    return true;
+    const raw = run(['release', 'view', tag, '--repo', fullRepo, '--json', 'isDraft,tagName']);
+    const release = JSON.parse(raw);
+    return release?.isDraft === true ? 'draft' : 'published';
   } catch {
-    return false;
+    return 'missing';
   }
 }
-if (!exists() && !process.argv.includes('--wait')) {
+
+function ensureDraft() {
+  const status = draftStatus();
+  if (status === 'draft') return;
+  if (status === 'published') {
+    throw new Error(
+      `Release ${tag} is already published. Refusing to treat it as a draft. Bump the version or delete/retarget the release.`
+    );
+  }
+  const target = execFileSync('git', ['rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+  }).trim();
   const args = [
     'release',
     'create',
@@ -29,13 +41,27 @@ if (!exists() && !process.argv.includes('--wait')) {
     '--generate-notes',
     '--title',
     `Tuxedo MD ${pkg.version}`,
+    '--target',
+    target,
   ];
   if (pkg.version.includes('-')) args.push('--prerelease');
   run(args, 'inherit');
-} else if (process.argv.includes('--wait')) {
+}
+
+if (process.argv.includes('--wait')) {
   let attempts = 0;
-  while (!exists() && attempts++ < 60)
+  let status = draftStatus();
+  while (status !== 'draft' && attempts++ < 60) {
+    if (status === 'published') {
+      throw new Error(
+        `Release ${tag} is already published. Refusing to wait for a draft with the same tag.`
+      );
+    }
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5000);
-  if (!exists()) throw new Error(`Timed out waiting for ${tag}.`);
+    status = draftStatus();
+  }
+  if (status !== 'draft') throw new Error(`Timed out waiting for draft ${tag}.`);
+} else {
+  ensureDraft();
 }
 console.log(`Draft release ${tag} is ready.`);

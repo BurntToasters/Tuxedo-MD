@@ -5,14 +5,19 @@ export type MenuCommandId =
   | 'open-document'
   | 'save-document'
   | 'save-document-as'
+  | 'close-tab'
   | 'quit'
   | 'find'
   | 'command-palette'
+  | 'next-tab'
+  | 'previous-tab'
   | 'toggle-sidebar'
   | 'editor-view'
   | 'split-view'
   | 'preview-view'
-  | 'settings';
+  | 'toggle-focus-mode'
+  | 'settings'
+  | 'check-updates';
 
 export type MenuEntry =
   { type: 'item'; id: MenuCommandId; label: string; shortcut?: string } | { type: 'separator' };
@@ -43,6 +48,12 @@ export function buildFileMenu(): MenuEntry[] {
       label: 'Save As…',
       shortcut: formatShortcut({ mod: true, shift: true, key: 's' }),
     },
+    {
+      type: 'item',
+      id: 'close-tab',
+      label: 'Close Tab',
+      shortcut: formatShortcut({ mod: true, key: 'w' }),
+    },
     { type: 'separator' },
     { type: 'item', id: 'quit', label: 'Exit' },
   ];
@@ -56,6 +67,15 @@ export function buildEditMenu(): MenuEntry[] {
       id: 'command-palette',
       label: 'Command Palette',
       shortcut: formatShortcut({ mod: true, shift: true, key: 'p' }),
+    },
+    { type: 'separator' },
+    // Ctrl+Tab intentionally — Cmd+Tab is the macOS app switcher.
+    { type: 'item', id: 'next-tab', label: 'Next Tab', shortcut: 'Ctrl+Tab' },
+    {
+      type: 'item',
+      id: 'previous-tab',
+      label: 'Previous Tab',
+      shortcut: 'Ctrl+Shift+Tab',
     },
   ];
 }
@@ -86,6 +106,7 @@ export function buildViewMenu(): MenuEntry[] {
       label: 'Preview',
       shortcut: formatShortcut({ mod: true, shift: true, key: 'v' }),
     },
+    { type: 'item', id: 'toggle-focus-mode', label: 'Focus Mode' },
     {
       type: 'item',
       id: 'settings',
@@ -93,4 +114,9 @@ export function buildViewMenu(): MenuEntry[] {
       shortcut: formatShortcut({ mod: true, key: ',' }),
     },
   ];
+}
+
+export function buildHelpMenu(updatesSupported = false): MenuEntry[] {
+  if (!updatesSupported) return [];
+  return [{ type: 'item', id: 'check-updates', label: 'Check for Updates…' }];
 }

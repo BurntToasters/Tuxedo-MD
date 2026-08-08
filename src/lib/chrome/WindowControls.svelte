@@ -6,12 +6,16 @@
 
   let maximized = $state(false);
 
-  function stopDrag(event: MouseEvent) {
+  function stopChromeCapture(event: Event) {
     event.stopPropagation();
   }
 
   async function refreshMaximized() {
-    maximized = await getCurrentWindow().isMaximized();
+    try {
+      maximized = await getCurrentWindow().isMaximized();
+    } catch (error) {
+      console.error('isMaximized failed', error);
+    }
   }
 
   $effect(() => {
@@ -19,40 +23,57 @@
     let unlisten: (() => void) | undefined;
     void refreshMaximized();
     void window
-      .onResized(() => refreshMaximized())
+      .onResized(() => {
+        void refreshMaximized();
+      })
       .then((fn) => {
         unlisten = fn;
-      });
+      })
+      .catch((error) => console.error('onResized failed', error));
     return () => unlisten?.();
   });
 
-  function minimize(event: MouseEvent) {
-    stopDrag(event);
-    void getCurrentWindow().minimize();
+  function minimize(event: PointerEvent) {
+    if (event.button !== 0) return;
+    stopChromeCapture(event);
+    event.preventDefault();
+    void getCurrentWindow()
+      .minimize()
+      .catch((error) => console.error('minimize failed', error));
   }
 
-  function toggleMaximize(event: MouseEvent) {
-    stopDrag(event);
+  function toggleMaximize(event: PointerEvent) {
+    if (event.button !== 0) return;
+    stopChromeCapture(event);
+    event.preventDefault();
     void getCurrentWindow()
       .toggleMaximize()
       .then(() => refreshMaximized())
       .catch((error) => console.error('toggleMaximize failed', error));
   }
 
-  function close(event: MouseEvent) {
-    stopDrag(event);
+  function close(event: PointerEvent) {
+    if (event.button !== 0) return;
+    stopChromeCapture(event);
+    event.preventDefault();
     onclose();
   }
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="window-controls" data-tauri-no-drag onmousedown={stopDrag} onpointerdown={stopDrag}>
+<div
+  class="window-controls"
+  data-tauri-no-drag
+  onmousedown={stopChromeCapture}
+  onpointerdown={stopChromeCapture}
+>
   <button
     type="button"
     class="window-control"
     title="Minimize"
     aria-label="Minimize"
-    onclick={minimize}
+    data-tauri-no-drag
+    onpointerdown={minimize}
   >
     <Minus size={11} strokeWidth={2.25} />
   </button>
@@ -61,7 +82,8 @@
     class="window-control"
     title={maximized ? 'Restore' : 'Maximize'}
     aria-label={maximized ? 'Restore' : 'Maximize'}
-    onclick={toggleMaximize}
+    data-tauri-no-drag
+    onpointerdown={toggleMaximize}
   >
     {#if maximized}
       <Minimize2 size={10} strokeWidth={2.25} />
@@ -74,7 +96,8 @@
     class="window-control close"
     title="Close"
     aria-label="Close"
-    onclick={close}
+    data-tauri-no-drag
+    onpointerdown={close}
   >
     <X size={11} strokeWidth={2.25} />
   </button>

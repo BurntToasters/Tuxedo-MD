@@ -100,7 +100,13 @@ export async function probeDocument(path: string): Promise<FileDocument> {
 
 export async function loadState<T>(key: string): Promise<T | null> {
   const content = await invoke<string | null>('load_app_state', { key });
-  return content ? (JSON.parse(content) as T) : null;
+  if (!content) return null;
+  try {
+    return JSON.parse(content) as T;
+  } catch {
+    // Corrupt state must not abort restore and wipe a good session.
+    return null;
+  }
 }
 
 export async function saveState(key: string, value: unknown): Promise<void> {

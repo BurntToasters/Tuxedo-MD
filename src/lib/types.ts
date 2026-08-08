@@ -77,6 +77,8 @@ export interface DocumentReferences {
 
 export type Theme = 'system' | 'dark' | 'light' | 'contrast';
 
+export type UpdateChannel = 'auto' | 'stable' | 'beta';
+
 export interface AppSettings {
   version: 1;
   autosave: boolean;
@@ -92,6 +94,8 @@ export interface AppSettings {
   previewFont: 'sans' | 'serif' | 'mono';
   spellcheck: boolean;
   focusMode: boolean;
+  autoCheckUpdates: boolean;
+  updateChannel: UpdateChannel;
 }
 
 export interface SessionState {
@@ -119,4 +123,6 @@ export const defaultSettings: AppSettings = {
   previewFont: 'sans',
   spellcheck: false,
   focusMode: false,
+  autoCheckUpdates: true,
+  updateChannel: 'auto',
 };

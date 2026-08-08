@@ -1,5 +1,5 @@
 import { execFileSync, execSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -104,6 +104,23 @@ if (prerelease && windowsBuild && !args.includes('--no-bundle')) {
   console.log(`[tauri-build] ${pkg.version} is a pre-release; MSI output is disabled.`);
 }
 
+const configPath = valueAfter('--config');
+const isAppStoreBuild = /tauri\.appstore\.conf\.json$/i.test(configPath.replace(/\\/g, '/'));
+if (isAppStoreBuild) {
+  // Skip overlay private-API chrome usage in the App Store binary.
+  if (!args.some((arg) => arg === '--features' || arg.startsWith('--features='))) {
+    args.push('--features', 'mas');
+  }
+}
+
+if (required.windowsSigning && !skipWindowsCodeSigning) {
+  // Sign app binary before packaging and installers after via Tauri signCommand.
+  const signConfig = 'src-tauri/tauri.windows-sign.conf.json';
+  if (!args.some((arg) => arg.includes('tauri.windows-sign.conf.json'))) {
+    args.push('--config', signConfig);
+  }
+}
+
 execFileSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['tauri', 'build', ...args], {
   stdio: 'inherit',
   env: process.env,
@@ -112,30 +129,6 @@ execFileSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['tauri', 'build'
 if (required.windowsSigning && !skipWindowsCodeSigning) {
   const root = fileURLToPath(new URL('..', import.meta.url));
   const targetReleaseDir = path.join(root, 'src-tauri', 'target', target, 'release');
-  const signScript = fileURLToPath(new URL('./windows-artifact-sign.ps1', import.meta.url));
-  const runtimeExecutables = readdirSync(targetReleaseDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith('.exe'))
-    .map((entry) => path.join(targetReleaseDir, entry.name));
-  if (!runtimeExecutables.length) {
-    throw new Error(`No final Windows runtime executables found under ${targetReleaseDir}`);
-  }
-  for (const executable of runtimeExecutables) {
-    console.log(`[tauri-build] Finalizing Authenticode signature: ${executable}`);
-    execFileSync(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-ExecutionPolicy',
-        'Bypass',
-        '-File',
-        signScript,
-        '-FilePath',
-        executable,
-      ],
-      { stdio: 'inherit', env: process.env }
-    );
-  }
   execFileSync(
     'powershell.exe',
     [

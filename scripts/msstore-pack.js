@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { toMsixIdentityVersion } from './msstore-version.js';
 
 if (process.platform !== 'win32') throw new Error('MSIX packaging must run on Windows.');
 const required = ['MSSTORE_IDENTITY_NAME', 'MSSTORE_PUBLISHER', 'MSSTORE_PUBLISHER_DISPLAY_NAME'];
@@ -9,26 +10,31 @@ if (missing.length) throw new Error(`Missing environment variables: ${missing.jo
 
 const root = path.resolve(import.meta.dirname, '..');
 const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-const numericVersion = pkg.version
-  .replace(/-.+$/, '')
-  .split('.')
-  .concat('0', '0', '0', '0')
-  .slice(0, 4)
-  .join('.');
+const numericVersion = toMsixIdentityVersion(pkg.version);
 
 const outputDir = path.join(root, 'msstore');
 fs.mkdirSync(outputDir, { recursive: true });
 
-const TARGETS = [
+const ALL_TARGETS = [
   { arch: 'x64', rustTarget: 'x86_64-pc-windows-msvc', msixArch: 'x64' },
   { arch: 'arm64', rustTarget: 'aarch64-pc-windows-msvc', msixArch: 'arm64' },
 ];
+const requestedArch = (process.argv[2] || '').toLowerCase();
+const TARGETS = requestedArch
+  ? ALL_TARGETS.filter((target) => target.arch === requestedArch)
+  : ALL_TARGETS;
+if (requestedArch && TARGETS.length === 0) {
+  throw new Error(`Unsupported msstore arch '${requestedArch}'. Use x64, arm64, or omit for both.`);
+}
 
 const generatedMsixFiles = [];
 
 for (const { arch, rustTarget, msixArch } of TARGETS) {
   const executable = path.join(root, `src-tauri/target/${rustTarget}/release/tuxedomd.exe`);
   if (!fs.existsSync(executable)) {
+    if (requestedArch) {
+      throw new Error(`Missing ${executable} for requested arch ${arch}.`);
+    }
     console.log(`Skipping ${arch}, missing ${executable}`);
     continue;
   }

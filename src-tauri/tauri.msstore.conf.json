@@ -1,5 +1,11 @@
 {
   "identifier": "run.rosie.tuxedomd.pro",
+  "plugins": {
+    "updater": {
+      "active": false,
+      "endpoints": []
+    }
+  },
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": false,

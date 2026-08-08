@@ -18,10 +18,18 @@ if (!fs.existsSync(app)) {
   throw new Error(`Missing ${app}; run npm run build:mac:appstore first.`);
 }
 
-const releaseDir = path.join(root, 'release');
-fs.mkdirSync(releaseDir, { recursive: true });
+const infoPlist = path.join(app, 'Contents', 'Info.plist');
+const info = fs.readFileSync(infoPlist, 'utf8');
+if (!info.includes('run.rosie.tuxedomd.pro')) {
+  throw new Error(
+    'Refusing to package a non-Pro app as MAS. Build with tauri.appstore.conf.json first.'
+  );
+}
 
-const outputPkg = path.join(releaseDir, `TuxedoMD.Pro_${pkg.version}_universal.pkg`);
+const masDir = path.join(root, 'mas');
+fs.mkdirSync(masDir, { recursive: true });
+
+const outputPkg = path.join(masDir, `TuxedoMD.Pro_${pkg.version}_universal.pkg`);
 fs.rmSync(outputPkg, { force: true });
 
 execFileSync(

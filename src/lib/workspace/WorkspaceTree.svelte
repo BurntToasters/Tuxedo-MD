@@ -79,7 +79,6 @@
         }
         break;
       case 'Delete':
-      case 'Backspace':
         if (node.kind === 'file' && oncontextaction) {
           event.preventDefault();
           oncontextaction('delete', node);

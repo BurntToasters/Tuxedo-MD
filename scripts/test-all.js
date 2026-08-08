@@ -8,19 +8,34 @@ const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 const checks = [
+  ['Version sync', 'node', ['scripts/verify-version-sync.js']],
   ['Typecheck', npm, ['run', 'typecheck']],
   ['Test typecheck', npm, ['run', 'typecheck:test']],
   ['Lint', npm, ['run', 'lint:prod']],
   ['Test lint', npm, ['run', 'lint:test']],
   ['Format', npm, ['run', 'format:check']],
   ['Tests', npm, ['run', 'test:cov']],
-  ['Rust check', 'cargo', ['check', '--manifest-path', 'src-tauri/Cargo.toml']],
+  ['Updater fixtures', npm, ['run', 'validate:updater']],
+  ['Rust check', 'cargo', ['check', '--locked', '--manifest-path', 'src-tauri/Cargo.toml']],
   [
     'Rust clippy',
     'cargo',
-    ['clippy', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets', '--', '-D', 'warnings'],
+    [
+      'clippy',
+      '--locked',
+      '--manifest-path',
+      'src-tauri/Cargo.toml',
+      '--all-targets',
+      '--',
+      '-D',
+      'warnings',
+    ],
   ],
-  ['Rust tests', 'cargo', ['test', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets']],
+  [
+    'Rust tests',
+    'cargo',
+    ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets'],
+  ],
 ];
 
 clearQualityGateProof(root);

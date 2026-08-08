@@ -26,5 +26,24 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-require-imports': 'off',
     },
+  },
+  {
+    // Ported from Zinnia's release/updater pipeline; keep behavior aligned over style nits.
+    files: [
+      'scripts/gpg-sign.js',
+      'scripts/updater-signature-verifier.js',
+      'scripts/validate-updater-manifest.js',
+      'scripts/validate-updater-live.js',
+      'scripts/updater-live-helpers.js',
+    ],
+    rules: {
+      'no-empty': 'off',
+      'no-useless-assignment': 'off',
+      'preserve-caught-error': 'off',
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
+      ],
+    },
   }
 );

@@ -6,11 +6,13 @@ use std::{
     path::{Path, PathBuf},
     sync::Mutex,
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Url};
 use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
 
 const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+/// Session/draft JSON can hold multiple tabs; keep a hard ceiling above one document.
+const MAX_APP_STATE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_WORKSPACE_FILES: usize = 20_000;
 const MAX_SEARCH_RESULTS: usize = 500;
 /// Files above this size are skipped while scanning so a stray large file cannot
@@ -24,6 +26,8 @@ struct PendingOpenPaths(Mutex<Vec<String>>);
 enum AppError {
     #[error("The selected file is larger than 16 MB")]
     FileTooLarge,
+    #[error("Saved application state exceeds the 64 MB limit")]
+    AppStateTooLarge,
     #[error("The selected path is not a regular file")]
     NotAFile,
     #[error("The selected workspace path is not a folder")]
@@ -189,7 +193,6 @@ struct BuildInfo {
     capabilities: Vec<EditionCapability>,
 }
 
-#[tauri::command]
 fn read_document(path: &Path) -> Result<FileDocument, AppError> {
     let metadata = fs::metadata(path)?;
     if !metadata.is_file() {
@@ -199,16 +202,18 @@ fn read_document(path: &Path) -> Result<FileDocument, AppError> {
         return Err(AppError::FileTooLarge);
     }
 
-    let content = fs::read_to_string(path)?;
+    // Canonicalize so Open dialog paths match workspace-scan paths (one tab per file).
+    let canonical = fs::canonicalize(path)?;
+    let content = fs::read_to_string(&canonical)?;
     Ok(FileDocument {
-        name: path
+        name: canonical
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("Untitled.md")
             .to_owned(),
-        path: path.to_string_lossy().into_owned(),
+        path: canonical.to_string_lossy().into_owned(),
         content,
-        fingerprint: fingerprint(path, &metadata)?,
+        fingerprint: fingerprint(&canonical, &metadata)?,
     })
 }
 
@@ -237,6 +242,9 @@ fn save_document(
     expected_fingerprint: Option<DocumentFingerprint>,
     force: bool,
 ) -> Result<DocumentFingerprint, AppError> {
+    if content.len() as u64 > MAX_DOCUMENT_BYTES {
+        return Err(AppError::FileTooLarge);
+    }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 
@@ -276,11 +284,16 @@ fn probe_document(path: PathBuf) -> Result<FileDocument, AppError> {
     read_document(&path)
 }
 
+fn is_valid_state_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+}
+
 fn state_file(app: &AppHandle, key: &str) -> Result<PathBuf, AppError> {
-    if !key
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-    {
+    if !is_valid_state_key(key) {
         return Err(AppError::InvalidStateKey);
     }
     let directory = app
@@ -302,6 +315,9 @@ fn load_app_state(app: AppHandle, key: String) -> Result<Option<String>, AppErro
 
 #[tauri::command]
 fn save_app_state(app: AppHandle, key: String, content: String) -> Result<(), AppError> {
+    if content.len() as u64 > MAX_APP_STATE_BYTES {
+        return Err(AppError::AppStateTooLarge);
+    }
     let path = state_file(&app, &key)?;
     write_replacement(&path, content.as_bytes())
 }
@@ -727,6 +743,40 @@ fn validate_file_name(name: &str) -> Result<(), AppError> {
     if !is_markdown(Path::new(trimmed)) {
         return Err(AppError::NotMarkdown);
     }
+    // Windows reserved device names (CON, PRN, AUX, NUL, COM1.., LPT1..).
+    let stem = Path::new(trimmed)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or(trimmed);
+    let upper = stem.to_ascii_uppercase();
+    let reserved = matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if reserved {
+        return Err(AppError::InvalidFileName);
+    }
     Ok(())
 }
 
@@ -784,15 +834,35 @@ fn create_workspace_document(
     content: String,
 ) -> Result<WorkspaceEntry, AppError> {
     let target = resolve_inside_workspace(&root, &path)?;
-    if target.exists() {
-        return Err(AppError::AlreadyExists);
+    // symlink_metadata catches broken symlinks that exists() would miss (write-through escape).
+    match fs::symlink_metadata(&target) {
+        Ok(_) => return Err(AppError::AlreadyExists),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     if content.len() as u64 > MAX_DOCUMENT_BYTES {
         return Err(AppError::FileTooLarge);
     }
     write_replacement(&target, content.as_bytes())?;
     let canonical_root = fs::canonicalize(&root)?;
-    Ok(workspace_entry(&canonical_root, &target))
+    let canonical_target = fs::canonicalize(&target)?;
+    Ok(workspace_entry(&canonical_root, &canonical_target))
+}
+
+/// Regular markdown files, or markdown-named symlinks (including dangling ones).
+fn is_markdown_file_entry(path: &Path) -> Result<bool, AppError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() {
+                Ok(is_markdown(path))
+            } else {
+                Ok(file_type.is_file())
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[tauri::command]
@@ -802,7 +872,7 @@ fn rename_workspace_document(
     new_name: String,
 ) -> Result<WorkspaceEntry, AppError> {
     let source = resolve_inside_workspace(&root, &path)?;
-    if !source.is_file() {
+    if !is_markdown_file_entry(&source)? {
         return Err(AppError::NotAFile);
     }
     validate_file_name(&new_name)?;
@@ -815,20 +885,25 @@ fn rename_workspace_document(
     )?;
     if destination == source {
         let canonical_root = fs::canonicalize(&root)?;
-        return Ok(workspace_entry(&canonical_root, &source));
+        let reported = fs::canonicalize(&source).unwrap_or(source);
+        return Ok(workspace_entry(&canonical_root, &reported));
     }
-    if destination.exists() {
-        return Err(AppError::AlreadyExists);
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => return Err(AppError::AlreadyExists),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     fs::rename(&source, &destination)?;
     let canonical_root = fs::canonicalize(&root)?;
-    Ok(workspace_entry(&canonical_root, &destination))
+    // Dangling markdown symlinks cannot be canonicalized; the resolved path stays in-root.
+    let reported = fs::canonicalize(&destination).unwrap_or(destination);
+    Ok(workspace_entry(&canonical_root, &reported))
 }
 
 #[tauri::command]
 fn delete_workspace_document(root: PathBuf, path: PathBuf) -> Result<(), AppError> {
     let target = resolve_inside_workspace(&root, &path)?;
-    if !target.is_file() {
+    if !is_markdown_file_entry(&target)? {
         return Err(AppError::NotAFile);
     }
     fs::remove_file(target)?;
@@ -885,6 +960,46 @@ fn get_build_info() -> BuildInfo {
     }
 }
 
+/// GitHub direct builds (CE Win/Mac + Full Linux) support in-app updates.
+/// Mac App Store / Microsoft Store overlays use the `.pro` identifier and do not.
+fn identifier_supports_updates(identifier: &str) -> bool {
+    !identifier.ends_with(".pro")
+}
+
+#[tauri::command]
+fn updates_supported(app: AppHandle) -> bool {
+    identifier_supports_updates(&app.config().identifier)
+}
+
+#[tauri::command]
+fn get_beta_updater_target() -> String {
+    use tauri::utils::config::BundleType;
+
+    let os = match std::env::consts::OS {
+        "windows" => "windows",
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86" => "i686",
+        "arm64" => "aarch64",
+        other => other,
+    };
+    let installer = match tauri::utils::platform::bundle_type() {
+        Some(BundleType::Deb) => Some("deb"),
+        Some(BundleType::Rpm) => Some("rpm"),
+        Some(BundleType::AppImage) => Some("appimage"),
+        Some(BundleType::Msi) => Some("msi"),
+        Some(BundleType::Nsis) => Some("nsis"),
+        Some(BundleType::App | BundleType::Dmg) => Some("app"),
+        None => None,
+    };
+    match installer {
+        Some(installer) => format!("{os}-beta-{arch}-{installer}"),
+        None => format!("{os}-beta-{arch}"),
+    }
+}
+
 fn markdown_paths(arguments: impl IntoIterator<Item = String>) -> Vec<String> {
     arguments
         .into_iter()
@@ -931,8 +1046,16 @@ fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
                     true,
                     Some("CmdOrCtrl+Shift+S"),
                 )?,
+                &MenuItem::with_id(
+                    handle,
+                    "close-tab",
+                    "Close Tab",
+                    true,
+                    Some("CmdOrCtrl+W"),
+                )?,
                 &PredefinedMenuItem::separator(handle)?,
-                &PredefinedMenuItem::quit(handle, None)?,
+                // Custom quit so the frontend can confirm unsaved changes first.
+                &MenuItem::with_id(handle, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
             ],
         )?;
         let edit = Submenu::with_items(
@@ -947,6 +1070,15 @@ fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
                     "Command Palette",
                     true,
                     Some("CmdOrCtrl+Shift+P"),
+                )?,
+                &PredefinedMenuItem::separator(handle)?,
+                &MenuItem::with_id(handle, "next-tab", "Next Tab", true, Some("Ctrl+Tab"))?,
+                &MenuItem::with_id(
+                    handle,
+                    "previous-tab",
+                    "Previous Tab",
+                    true,
+                    Some("Ctrl+Shift+Tab"),
                 )?,
             ],
         )?;
@@ -983,12 +1115,44 @@ fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
                     true,
                     Some("CmdOrCtrl+Shift+V"),
                 )?,
+                &MenuItem::with_id(handle, "toggle-focus-mode", "Focus Mode", true, None::<&str>)?,
                 &MenuItem::with_id(handle, "settings", "Settings", true, Some("CmdOrCtrl+,"))?,
             ],
         )?;
-        app.set_menu(Menu::with_items(handle, &[&file, &edit, &view])?)?;
+        if updates_supported(handle.clone()) {
+            let help = Submenu::with_items(
+                handle,
+                "Help",
+                true,
+                &[&MenuItem::with_id(
+                    handle,
+                    "check-updates",
+                    "Check for Updates…",
+                    true,
+                    None::<&str>,
+                )?],
+            )?;
+            app.set_menu(Menu::with_items(handle, &[&file, &edit, &view, &help])?)?;
+        } else {
+            app.set_menu(Menu::with_items(handle, &[&file, &edit, &view])?)?;
+        }
     }
     Ok(())
+}
+
+fn allow_webview_navigation(url: &Url) -> bool {
+    // Intentionally omit data:/blob: so a compromised renderer cannot navigate to active HTML.
+    match url.scheme() {
+        "tauri" | "asset" | "ipc" => true,
+        "http" | "https" => matches!(
+            url.host_str(),
+            Some("localhost")
+                | Some("127.0.0.1")
+                | Some("tauri.localhost")
+                | Some("ipc.localhost")
+        ),
+        _ => false,
+    }
 }
 
 fn setup_window_chrome(app: &tauri::App) -> tauri::Result<()> {
@@ -1001,7 +1165,8 @@ fn setup_window_chrome(app: &tauri::App) -> tauri::Result<()> {
         window.set_decorations(false)?;
     }
 
-    #[cfg(target_os = "macos")]
+    // Skip overlay chrome for MAS builds (`--features mas`).
+    #[cfg(all(target_os = "macos", not(feature = "mas")))]
     {
         use tauri::TitleBarStyle;
         window.set_title_bar_style(TitleBarStyle::Overlay)?;
@@ -1125,6 +1290,16 @@ pub fn run() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, arguments, _| {
             let paths = markdown_paths(arguments);
             if !paths.is_empty() {
+                // Queue before emit so opens survive if the frontend listener is not ready yet.
+                if let Some(pending) = app.try_state::<PendingOpenPaths>() {
+                    if let Ok(mut guard) = pending.0.lock() {
+                        for path in &paths {
+                            if !guard.iter().any(|existing| existing == path) {
+                                guard.push(path.clone());
+                            }
+                        }
+                    }
+                }
                 let _ = app.emit("open-paths", paths);
             }
             if let Some(window) = app.get_webview_window("main") {
@@ -1133,14 +1308,25 @@ pub fn run() {
             }
         }));
     }
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    {
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    }
     builder
         .setup(|app| {
             setup_window_chrome(app)?;
             setup_native_menu(app)?;
             Ok(())
         })
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry, ()>::new("navigation-guard")
+                .on_navigation(|_webview, url| allow_webview_navigation(url))
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .invoke_handler(tauri::generate_handler![
             open_document,
             save_document,
@@ -1158,13 +1344,45 @@ pub fn run() {
             delete_app_state,
             take_pending_open_paths,
             get_licenses,
-            set_document_edited
+            set_document_edited,
+            updates_supported,
+            get_beta_updater_target
         ])
         .on_menu_event(|app, event| {
             let _ = app.emit("native-menu-command", event.id().as_ref().to_string());
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Tuxedo MD");
+        .build(tauri::generate_context!())
+        .expect("error while building Tuxedo MD")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            {
+                if let tauri::RunEvent::Opened { urls } = event {
+                    let paths = urls
+                        .into_iter()
+                        .filter_map(|url| url.to_file_path().ok())
+                        .filter(|path| path.is_file() && is_markdown(path))
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect::<Vec<_>>();
+                    if paths.is_empty() {
+                        return;
+                    }
+                    if let Some(pending) = app.try_state::<PendingOpenPaths>() {
+                        if let Ok(mut guard) = pending.0.lock() {
+                            for path in &paths {
+                                if !guard.iter().any(|existing| existing == path) {
+                                    guard.push(path.clone());
+                                }
+                            }
+                        }
+                    }
+                    let _ = app.emit("open-paths", paths);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app, event);
+            }
+        });
 }
 
 #[cfg(test)]
@@ -1186,6 +1404,9 @@ mod tests {
         assert!(validate_file_name(".hidden.md").is_err());
         assert!(validate_file_name("nested/notes.md").is_err());
         assert!(validate_file_name("notes.txt").is_err());
+        assert!(validate_file_name("CON.md").is_err());
+        assert!(validate_file_name("nul.md").is_err());
+        assert!(validate_file_name("com1.md").is_err());
     }
 
     #[test]
@@ -1268,5 +1489,61 @@ mod tests {
         let root = std::env::temp_dir();
         assert!(search_workspace(root.clone(), "anything".into(), false).is_err());
         assert!(collect_workspace_references(root).is_err());
+    }
+
+    #[test]
+    fn store_identifiers_disable_in_app_updates() {
+        assert!(identifier_supports_updates("run.rosie.tuxedomd"));
+        assert!(!identifier_supports_updates("run.rosie.tuxedomd.pro"));
+    }
+
+    #[test]
+    fn state_keys_reject_empty_and_oversized_values() {
+        assert!(!is_valid_state_key(""));
+        assert!(!is_valid_state_key(&"a".repeat(129)));
+        assert!(is_valid_state_key("session"));
+        assert!(is_valid_state_key("draft-abc_123"));
+        assert!(!is_valid_state_key("../escape"));
+    }
+
+    #[test]
+    fn navigation_guard_blocks_active_markup_schemes() {
+        assert!(allow_webview_navigation(
+            &Url::parse("tauri://localhost/index.html").expect("url")
+        ));
+        assert!(!allow_webview_navigation(
+            &Url::parse("data:text/html,alert(1)").expect("url")
+        ));
+        assert!(!allow_webview_navigation(
+            &Url::parse("blob:https://example.com/uuid").expect("url")
+        ));
+        assert!(!allow_webview_navigation(
+            &Url::parse("https://example.com/").expect("url")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_and_rename_accept_dangling_markdown_symlinks() {
+        let root = std::env::temp_dir().join(format!("tuxedo-symlink-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("workspace fixture");
+        let dangling = root.join("ghost.md");
+        std::os::unix::fs::symlink(root.join("missing-target.md"), &dangling)
+            .expect("create dangling symlink");
+
+        assert!(is_markdown_file_entry(&dangling).expect("symlink metadata"));
+        rename_workspace_document(root.clone(), dangling.clone(), "renamed.md".into())
+            .expect("rename dangling markdown symlink");
+        let renamed = root.join("renamed.md");
+        assert!(renamed
+            .symlink_metadata()
+            .expect("renamed link")
+            .file_type()
+            .is_symlink());
+        delete_workspace_document(root.clone(), renamed).expect("delete dangling markdown symlink");
+        assert!(!root.join("renamed.md").exists());
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

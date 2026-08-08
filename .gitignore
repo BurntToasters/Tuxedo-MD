@@ -5,6 +5,7 @@ coverage-headless/
 coverage/.release-quality.json
 release/
 msstore/
+mas/
 flatpak-repo/
 flatpak-build*/
 .env

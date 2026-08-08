@@ -1,0 +1,24 @@
+[[permission]]
+identifier = "allow-app-commands"
+description = "Enables all Tuxedo MD application invoke commands."
+commands.allow = [
+  "open_document",
+  "save_document",
+  "scan_workspace",
+  "search_workspace",
+  "collect_workspace_references",
+  "create_workspace_document",
+  "rename_workspace_document",
+  "delete_workspace_document",
+  "probe_document",
+  "get_build_info",
+  "authorize_capability",
+  "load_app_state",
+  "save_app_state",
+  "delete_app_state",
+  "take_pending_open_paths",
+  "get_licenses",
+  "set_document_edited",
+  "updates_supported",
+  "get_beta_updater_target"
+]

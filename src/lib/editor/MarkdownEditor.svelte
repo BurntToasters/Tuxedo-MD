@@ -47,9 +47,13 @@
   let {
     documentId,
     value = '',
+    selection = { anchor: 0, head: 0 },
     showLineNumbers = true,
     tabSize = 4,
     spellcheck = false,
+    lineWrap = true,
+    visible = true,
+    retainedDocumentIds = [],
     findRequest = 0,
     revealRequest = null,
     onchange,
@@ -57,9 +61,13 @@
   }: {
     documentId: string;
     value?: string;
+    selection?: { anchor: number; head: number };
     showLineNumbers?: boolean;
     tabSize?: number;
     spellcheck?: boolean;
+    lineWrap?: boolean;
+    visible?: boolean;
+    retainedDocumentIds?: string[];
     findRequest?: number;
     revealRequest?: { line: number; token: number } | null;
     onchange: (value: string) => void;
@@ -73,10 +81,20 @@
   let lastSln: boolean | undefined = undefined;
   let lastTs: number | undefined = undefined;
   let lastSc: boolean | undefined = undefined;
+  let lastLw: boolean | undefined = undefined;
+  let lastVisible: boolean | undefined = undefined;
   let lastFindRequest = 0;
   let lastRevealToken = 0;
 
-  function createState(content: string, selection?: any) {
+  function clampSelection(content: string, next: { anchor: number; head: number }) {
+    const max = content.length;
+    return {
+      anchor: Math.max(0, Math.min(next.anchor, max)),
+      head: Math.max(0, Math.min(next.head, max)),
+    };
+  }
+
+  function createState(content: string, selectionRange?: { anchor: number; head: number }) {
     const ext = [
       highlightSpecialChars(),
       history(),
@@ -101,7 +119,6 @@
         ...completionKeymap,
         indentWithTab,
       ]),
-      EditorView.lineWrapping,
       indentUnit.of(' '.repeat(tabSize)),
       EditorView.contentAttributes.of({ spellcheck: spellcheck ? 'true' : 'false' }),
       EditorView.updateListener.of((update) => {
@@ -117,6 +134,8 @@
       }),
     ];
 
+    if (lineWrap) ext.push(EditorView.lineWrapping);
+
     if (showLineNumbers) {
       ext.push(lineNumbers());
       ext.push(highlightActiveLineGutter());
@@ -125,7 +144,7 @@
 
     return EditorState.create({
       doc: content,
-      selection,
+      selection: selectionRange ? clampSelection(content, selectionRange) : undefined,
       extensions: ext,
     });
   }
@@ -198,15 +217,30 @@
     view.focus();
   }
 
+  function stateForDocument(id: string, content: string, sel: { anchor: number; head: number }) {
+    const cached = states.get(id);
+    if (cached && cached.doc.toString() === content) return cached;
+    const selectionRange = cached
+      ? {
+          anchor: cached.selection.main.anchor,
+          head: cached.selection.main.head,
+        }
+      : sel;
+    const next = createState(content, selectionRange);
+    states.set(id, next);
+    return next;
+  }
+
   onMount(() => {
     localValue = value;
     currentId = documentId;
     lastSln = showLineNumbers;
     lastTs = tabSize;
     lastSc = spellcheck;
+    lastLw = lineWrap;
     view = new EditorView({
       parent: host,
-      state: states.get(documentId) ?? createState(value),
+      state: stateForDocument(documentId, value, selection),
     });
 
     return () => view?.destroy();
@@ -220,23 +254,31 @@
         states.set(currentId, view.state);
       }
       currentId = documentId;
-      const next = states.get(documentId) ?? createState(value);
+      const next = stateForDocument(documentId, value, selection);
       localValue = next.doc.toString();
       view.setState(next);
       lastSln = showLineNumbers;
       lastTs = tabSize;
       lastSc = spellcheck;
+      lastLw = lineWrap;
       return;
     }
 
-    if (showLineNumbers !== lastSln || tabSize !== lastTs || spellcheck !== lastSc) {
+    if (
+      showLineNumbers !== lastSln ||
+      tabSize !== lastTs ||
+      spellcheck !== lastSc ||
+      lineWrap !== lastLw
+    ) {
       lastSln = showLineNumbers;
       lastTs = tabSize;
       lastSc = spellcheck;
+      lastLw = lineWrap;
 
       const currentDoc = view.state.doc.toString();
-      const currentSelection = view.state.selection;
-      const nextState = createState(currentDoc, currentSelection);
+      const { anchor, head } = view.state.selection.main;
+      const nextState = createState(currentDoc, { anchor, head });
+      states.set(documentId, nextState);
       view.setState(nextState);
       return;
     }
@@ -244,6 +286,7 @@
     if (value === localValue) return;
     localValue = value;
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
+    states.set(documentId, view.state);
   });
 
   $effect(() => {
@@ -264,6 +307,24 @@
       effects: EditorView.scrollIntoView(line.from, { y: 'center' }),
     });
     view.focus();
+  });
+
+  $effect(() => {
+    if (!view || visible === lastVisible) return;
+    lastVisible = visible;
+    if (!visible) {
+      view.contentDOM.blur();
+      return;
+    }
+    view.requestMeasure();
+  });
+
+  $effect(() => {
+    const keep = new Set(retainedDocumentIds);
+    if (!keep.has(documentId)) keep.add(documentId);
+    for (const id of [...states.keys()]) {
+      if (!keep.has(id)) states.delete(id);
+    }
   });
 </script>
 

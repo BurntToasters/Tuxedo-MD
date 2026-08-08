@@ -121,10 +121,19 @@ body {
   align-self: stretch;
 }
 .titlebar.windows-chrome .titlebar-tabs {
+  flex: 0 1 auto;
   margin: 0 4px 0 0;
+}
+.titlebar.windows-chrome .titlebar-drag-fill {
+  flex: 1 1 auto;
+  min-width: 48px;
 }
 .titlebar.windows-chrome .toolbar {
   flex-shrink: 0;
+}
+.titlebar.windows-chrome .window-controls {
+  margin-left: 2px;
+  isolation: isolate;
 }
 .toolbar-quick-actions {
   display: flex;
@@ -228,10 +237,13 @@ body {
   height: 36px;
   flex-shrink: 0;
   margin-left: 0;
+  position: relative;
+  z-index: 50;
   -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 .window-control {
-  width: 34px;
+  width: 46px;
   height: 36px;
   border: 0;
   background: transparent;
@@ -240,8 +252,10 @@ body {
   place-items: center;
   cursor: default;
   -webkit-app-region: no-drag;
+  app-region: no-drag;
   position: relative;
-  z-index: 2;
+  z-index: 51;
+  pointer-events: auto;
 }
 .window-control:hover {
   background: rgba(255, 255, 255, 0.08);
@@ -252,15 +266,20 @@ body {
 }
 .app-shell.custom-chrome .titlebar {
   -webkit-app-region: drag;
+  app-region: drag;
 }
 :root[data-platform='windows'] .app-shell.custom-chrome .titlebar,
 :root[data-platform='windows'] .app-shell.custom-chrome .titlebar-main,
 :root[data-platform='windows'] .app-shell.custom-chrome .titlebar-tabs,
-:root[data-platform='windows'] .app-shell.custom-chrome .toolbar {
+:root[data-platform='windows'] .app-shell.custom-chrome .toolbar,
+:root[data-platform='windows'] .app-shell.custom-chrome .window-menubar,
+:root[data-platform='windows'] .app-shell.custom-chrome .window-controls {
   -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 :root[data-platform='windows'] .app-shell.custom-chrome .titlebar-drag-fill {
   -webkit-app-region: drag;
+  app-region: drag;
 }
 .app-shell.custom-chrome .titlebar button,
 .app-shell.custom-chrome .titlebar input,
@@ -268,6 +287,7 @@ body {
 .app-shell.custom-chrome .titlebar .window-control,
 .app-shell.custom-chrome .titlebar [data-tauri-no-drag] {
   -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 .brand,
 .toolbar {
@@ -445,7 +465,7 @@ body {
   background: rgba(255, 255, 255, 0.05);
 }
 .outline-list {
-  max-height: 150px;
+  /* Scroll with the drawer panel; avoid a hard 150px clip on Recent/Links. */
   overflow: auto;
   display: flex;
   flex-direction: column;
@@ -725,9 +745,6 @@ body {
   color: #d9dde6;
   font-size: var(--editor-font-size, 14px);
 }
-.source-pane.nowrap .cm-content {
-  white-space: pre;
-}
 .editor-host .cm-scroller {
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
   line-height: 1.72;
@@ -905,7 +922,8 @@ body {
   border-color: #8984f4;
 }
 .modal-backdrop {
-  z-index: 1000;
+  /* Above Windows menubar dropdowns (z-index 20000). */
+  z-index: 30000;
 }
 .command-palette-backdrop {
   --palette-top-inset: clamp(52px, 11vh, 112px);
@@ -1129,8 +1147,17 @@ body {
   .editor-grid {
     grid-template-columns: 1fr;
   }
+  .editor-grid.split-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .editor-grid.split-layout .source-pane {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-muted);
+  }
   .editor-grid.split-layout .preview-pane {
-    display: none;
+    display: block;
+    min-height: 0;
   }
 }
 
@@ -1357,36 +1384,36 @@ body {
 }
 .titlebar-tabs {
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   flex: 1;
   margin: 0 16px;
   height: 100%;
   min-width: 0;
   overflow-x: auto;
-  overflow-y: visible;
+  overflow-y: hidden;
   scrollbar-width: none;
 }
 .titlebar-tabs::-webkit-scrollbar {
   display: none;
 }
 .titlebar-tab {
-  height: 28px;
-  min-width: 90px;
-  max-width: 140px;
-  padding: 0 6px 0 10px;
+  height: 30px;
+  min-width: 96px;
+  max-width: 160px;
+  padding: 0 8px 0 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  border-radius: 6px 6px 0 0;
+  border-radius: 6px;
   border: 1px solid transparent;
-  border-bottom: 0;
   color: var(--text-muted);
   background: transparent;
   transition:
     background 0.15s,
     color 0.15s;
   flex-shrink: 0;
+  box-sizing: border-box;
 }
 .titlebar-tab:hover {
   background: rgba(255, 255, 255, 0.04);
@@ -1411,7 +1438,8 @@ body {
   background: transparent;
   color: inherit;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.25;
   text-align: left;
 }
 .titlebar-tab .tab-select span {
@@ -1419,6 +1447,8 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.25;
+  padding: 1px 0;
 }
 .titlebar-tab .tab-select span.dirty::after {
   content: ' •';
@@ -1456,9 +1486,9 @@ body {
   height: 10px;
 }
 .titlebar-new-tab {
-  width: 24px;
-  height: 24px;
-  margin-bottom: 2px;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 0;
   display: grid;
   place-items: center;
   border: 0;
@@ -1683,20 +1713,32 @@ body {
 
 /* Focus Mode styling */
 .app-shell.focus-mode .sidebar,
+.app-shell.focus-mode .drawer-backdrop,
 .app-shell.focus-mode .statusbar,
 .app-shell.focus-mode .formatting-toolbar {
   display: none !important;
 }
+.source-pane.pane-hidden {
+  display: none;
+}
 .app-shell.focus-mode .titlebar {
   opacity: 0;
+  height: 6px;
+  min-height: 6px;
+  overflow: hidden;
   transition:
     opacity 0.25s ease-in-out,
-    background-color 0.25s ease-in-out;
+    background-color 0.25s ease-in-out,
+    height 0.2s ease-in-out,
+    min-height 0.2s ease-in-out;
   z-index: 100;
 }
 .app-shell.focus-mode .titlebar:hover,
 .app-shell.focus-mode .titlebar:focus-within {
   opacity: 1;
+  height: auto;
+  min-height: 36px;
+  overflow: visible;
   background: var(--surface);
 }
 
@@ -1942,6 +1984,20 @@ body {
   background: var(--surface);
   color: var(--text);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.settings-action {
+  appearance: none;
+  border: 1px solid var(--border-muted);
+  background: var(--surface);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 12px;
+  font: inherit;
+  cursor: pointer;
+}
+.settings-action:hover {
+  border-color: var(--accent);
 }
 
 .settings-note {
@@ -2412,18 +2468,18 @@ body {
 
 .main-area {
   min-height: 0;
-  gap: 5px;
-  padding: 8px 8px 5px;
+  gap: 0;
+  padding: 0;
   background: var(--canvas);
 }
 .editor-grid {
   min-height: 0;
   overflow: hidden;
   isolation: isolate;
-  border: 1px solid var(--border-muted);
-  border-radius: 11px;
+  border: 0;
+  border-radius: 0;
   background: var(--document-surface);
-  box-shadow: var(--document-shadow);
+  box-shadow: none;
 }
 .source-pane,
 .preview-pane,
@@ -2567,11 +2623,11 @@ body {
 
 @media (max-width: 680px) {
   .main-area {
-    gap: 3px;
-    padding: 5px 5px 3px;
+    gap: 0;
+    padding: 0;
   }
   .editor-grid {
-    border-radius: 8px;
+    border-radius: 0;
   }
   .titlebar-tabs {
     margin-right: 6px;
@@ -2590,10 +2646,10 @@ body {
 
 @media (max-height: 500px) {
   .main-area {
-    padding-top: 4px;
+    padding-top: 0;
   }
   .editor-grid {
-    border-radius: 8px;
+    border-radius: 0;
   }
 }
 

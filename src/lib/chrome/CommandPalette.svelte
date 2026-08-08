@@ -48,7 +48,14 @@
 
     return () => {
       const target = returnFocus;
-      if (target?.isConnected) queueMicrotask(() => target.focus());
+      if (!target?.isConnected) return;
+      let node: HTMLElement | null = target;
+      while (node) {
+        const style = getComputedStyle(node);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+        node = node.parentElement;
+      }
+      queueMicrotask(() => target.focus());
     };
   });
 

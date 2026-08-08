@@ -76,7 +76,11 @@ export function pathsEqual(left, right, platform = process.platform) {
 }
 
 export function isMirrorableReleaseEntry(name) {
-  return Boolean(name) && !name.startsWith('.');
+  if (!name || name.startsWith('.')) return false;
+  // Keep Pro/store packs out of AFTER_PACK_LOC mirrors (CE GitHub release only).
+  if (/^TuxedoMD\.Pro_/i.test(name)) return false;
+  if (/\.(?:msix|msixbundle|pkg)$/i.test(name)) return false;
+  return true;
 }
 
 export function getReleaseEntries(releaseDir) {

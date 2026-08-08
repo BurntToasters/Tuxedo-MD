@@ -21,7 +21,8 @@
   } from '@lucide/svelte';
   import { onMount } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import { formatShortcut } from './lib/shortcuts';
+  import { formatShortcut, modKeyLabel } from './lib/shortcuts';
+  import { normalizeSettings } from './lib/settings';
   import MarkdownEditor from './lib/editor/MarkdownEditor.svelte';
   import {
     capabilityMessage,
@@ -53,7 +54,12 @@
     renameWorkspaceDocument,
     deleteWorkspaceDocument,
   } from './lib/tauri';
-  import { buildLinkGraph, sortedTagCounts, type LinkGraph } from './lib/link-graph';
+  import {
+    buildLinkGraph,
+    resolveReference,
+    sortedTagCounts,
+    type LinkGraph,
+  } from './lib/link-graph';
   import WorkspaceTree from './lib/workspace/WorkspaceTree.svelte';
   import {
     buildWorkspaceTree,
@@ -75,13 +81,22 @@
   import CommandPalette from './lib/chrome/CommandPalette.svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import {
+    autoCheckUpdates,
+    checkUpdates,
+    configureUpdater,
+    discardPendingUpdate,
+    resolveUpdatesSupported,
+  } from './lib/updater';
+  import {
     defaultSettings,
     type AppSettings,
     type DocumentTab,
     type EditorMode,
+    type DocumentReferences,
     type FileDocument,
     type SearchMatch,
     type SessionState,
+    type UpdateChannel,
     type WorkspaceEntry,
   } from './lib/types';
 
@@ -144,6 +159,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let settings = $state<AppSettings>(defaultSettings);
   let settingsOpen = $state(false);
   let activeSettingsTab = $state<'appearance' | 'editor' | 'files' | 'about'>('appearance');
+  let updatesSupported = $state(false);
+  let previousUpdateChannel = $state<UpdateChannel>(defaultSettings.updateChannel);
 
   // Licensing variables
   let licenses = $state<
@@ -211,12 +228,24 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let paletteOpen = $state(false);
   let conflictOpen = $state(false);
   let conflictTabId = $state<string | null>(null);
+  let conflictQueue = $state<string[]>([]);
   let recentFiles = $state<string[]>([]);
   let recentWorkspaces = $state<string[]>([]);
   let persistenceReady = $state(false);
+  let sessionPersistEnabled = false;
+  let persistGeneration = 0;
+  let persistChain: Promise<void> = Promise.resolve();
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let previewRenderRequest = 0;
+  let externalCheckInFlight = false;
+  const saveInFlightIds = new Set<string>();
+  const cancelledSaveTabIds = new Set<string>();
+  let draftIndexChain: Promise<void> = Promise.resolve();
+  let sessionRestoreComplete = false;
+  const deferredOpenPaths: string[] = [];
   let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let pollTimer: ReturnType<typeof setInterval> | undefined;
+  let searchRequestId = 0;
 
   let activeTab = $derived(tabs.find((tab) => tab.id === activeId) ?? tabs[0]);
   let hasUnsavedChanges = $derived(tabs.some((tab) => tab.content !== tab.savedContent));
@@ -265,7 +294,10 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
   $effect(() => {
     const content = activeTab?.content ?? '';
-    renderMarkdown(content).then((html) => (preview = html));
+    const request = ++previewRenderRequest;
+    renderMarkdown(content).then((html) => {
+      if (request === previewRenderRequest) preview = html;
+    });
   });
 
   let windowEffectRequest = 0;
@@ -329,9 +361,53 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     };
   });
 
+  let previousRestoreSession = settings.restoreSession;
+  let restoreSessionWatchReady = false;
   $effect(() => {
-    JSON.stringify({ settings, mode, activeId, tabIds: tabs.map((tab) => tab.id) });
-    if (persistenceReady && isDesktop()) scheduleSessionPersistence();
+    const settingsSnapshot = settings;
+    if (!persistenceReady || !isDesktop()) return;
+    // Ignore the post-restore settings load; only honor later user toggles.
+    if (!restoreSessionWatchReady) {
+      previousRestoreSession = settingsSnapshot.restoreSession;
+      restoreSessionWatchReady = true;
+    } else if (settingsSnapshot.restoreSession !== previousRestoreSession) {
+      previousRestoreSession = settingsSnapshot.restoreSession;
+      sessionPersistEnabled = settingsSnapshot.restoreSession;
+      if (!settingsSnapshot.restoreSession) {
+        // Cancel in-flight session writes that still hold a stale enabled snapshot.
+        persistGeneration += 1;
+        if (recoveryTimer) {
+          clearTimeout(recoveryTimer);
+          recoveryTimer = undefined;
+        }
+      }
+    }
+    void saveState('settings', settingsSnapshot).catch((error) => {
+      console.error('Failed to persist settings', error);
+    });
+  });
+
+  $effect(() => {
+    JSON.stringify({ mode, activeId, tabIds: tabs.map((tab) => tab.id), workspaceRoot });
+    if (persistenceReady && isDesktop() && sessionPersistEnabled) {
+      scheduleSessionPersistence();
+    }
+  });
+
+  $effect(() => {
+    configureUpdater({
+      settings: {
+        autoCheckUpdates: settings.autoCheckUpdates,
+        updateChannel: settings.updateChannel,
+      },
+      setStatus: (next) => {
+        status = next;
+      },
+    });
+    if (previousUpdateChannel !== settings.updateChannel) {
+      discardPendingUpdate();
+      previousUpdateChannel = settings.updateChannel;
+    }
   });
 
   $effect(() => {
@@ -366,8 +442,19 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     return document.activeElement instanceof HTMLElement ? document.activeElement : null;
   }
 
+  function isElementVisible(target: HTMLElement) {
+    if (!target.isConnected) return false;
+    let node: HTMLElement | null = target;
+    while (node) {
+      const style = getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      node = node.parentElement;
+    }
+    return true;
+  }
+
   function restoreFocus(target: HTMLElement | null) {
-    if (target?.isConnected) queueMicrotask(() => target.focus());
+    if (target && isElementVisible(target)) queueMicrotask(() => target.focus());
   }
 
   function openCommandPalette() {
@@ -389,9 +476,78 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   function openConflict(tabId: string) {
-    if (!conflictOpen) conflictReturnFocus = focusedElement();
+    if (conflictOpen) {
+      if (conflictTabId !== tabId && !conflictQueue.includes(tabId)) {
+        conflictQueue = [...conflictQueue, tabId];
+      }
+      return;
+    }
+    conflictReturnFocus = focusedElement();
     conflictTabId = tabId;
     conflictOpen = true;
+  }
+
+  function requestFind() {
+    if (mode === 'preview') mode = 'split';
+    findRequest += 1;
+  }
+
+  async function setDraftIndexed(id: string, keep: boolean) {
+    draftIndexChain = draftIndexChain.then(async () => {
+      const index = (await loadState<string[]>('draft-index')) ?? [];
+      const has = index.includes(id);
+      if (keep && !has) await saveState('draft-index', [...index, id]);
+      if (!keep && has) await saveState('draft-index', index.filter((item) => item !== id));
+    });
+    await draftIndexChain;
+  }
+
+  function pathsReferToSameFile(left: string | null | undefined, right: string | null | undefined) {
+    if (!left || !right) return false;
+    const normalize = (value: string) => value.replace(/\\/g, '/');
+    const a = normalize(left);
+    const b = normalize(right);
+    if (a === b) return true;
+    return a.toLowerCase() === b.toLowerCase();
+  }
+
+  async function recoverOrphanDrafts(existing: DocumentTab[]): Promise<DocumentTab[]> {
+    const index = (await loadState<string[]>('draft-index')) ?? [];
+    const recovered: DocumentTab[] = [];
+    for (const id of index) {
+      if (existing.some((tab) => tab.id === id)) continue;
+      const draft = await loadState<DocumentTab>(`draft-${id}`);
+      if (!draft || typeof draft.content !== 'string') continue;
+      recovered.push({
+        id: draft.id || id,
+        name: draft.name || 'Untitled.md',
+        path: draft.path ?? null,
+        content: draft.content,
+        savedContent: draft.savedContent ?? draft.content,
+        fingerprint: draft.fingerprint ?? null,
+        conflict: false,
+        recovered: true,
+        selection: draft.selection ?? { anchor: 0, head: 0 },
+      });
+    }
+    return recovered;
+  }
+
+  function showNextConflict() {
+    const nextId = conflictQueue.find((id) => tabs.some((tab) => tab.id === id && tab.conflict));
+    conflictQueue = nextId ? conflictQueue.filter((id) => id !== nextId) : [];
+    if (nextId) openConflict(nextId);
+  }
+
+  function dismissConflictForTab(id: string) {
+    conflictQueue = conflictQueue.filter((item) => item !== id);
+    if (conflictTabId !== id) return;
+    conflictOpen = false;
+    conflictTabId = null;
+    const target = conflictReturnFocus;
+    conflictReturnFocus = null;
+    restoreFocus(target);
+    showNextConflict();
   }
 
   function trapDialogFocus(event: KeyboardEvent) {
@@ -480,7 +636,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         section: 'Navigate',
         keywords: 'search text current',
         shortcut: formatShortcut({ mod: true, key: 'f' }),
-        run: () => (findRequest += 1),
+        run: requestFind,
       },
       {
         id: 'toggle-tools',
@@ -526,7 +682,10 @@ Try editing this document, or open a Markdown file from the toolbar.`;
           : 'Hide nonessential chrome while writing',
         section: 'View',
         keywords: 'zen distraction free chrome',
-        run: () => (settings.focusMode = !settings.focusMode),
+        run: () => {
+          settings.focusMode = !settings.focusMode;
+          if (settings.focusMode) void setSidebarOpen(false);
+        },
       },
       {
         id: 'open-settings',
@@ -556,6 +715,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   function runMenuCommand(id: MenuCommandId | string) {
+    // Modals own the interaction; keep Quit available for emergency exit.
+    if ((conflictOpen || namePrompt) && id !== 'quit') return;
     switch (id) {
       case 'new-document':
         newDocument();
@@ -569,14 +730,23 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       case 'save-document-as':
         void saveActive(true);
         break;
+      case 'close-tab':
+        closeTab(activeId);
+        break;
       case 'quit':
         if (isDesktop()) void requestAppClose(hasUnsavedChanges);
         break;
       case 'find':
-        findRequest += 1;
+        requestFind();
         break;
       case 'command-palette':
         openCommandPalette();
+        break;
+      case 'next-tab':
+        cycleTab(1);
+        break;
+      case 'previous-tab':
+        cycleTab(-1);
         break;
       case 'settings':
         openSettings();
@@ -590,18 +760,48 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       case 'preview-view':
         mode = 'preview';
         break;
+      case 'toggle-focus-mode':
+        settings = { ...settings, focusMode: !settings.focusMode };
+        if (settings.focusMode) void setSidebarOpen(false);
+        schedulePersistence();
+        break;
       case 'toggle-sidebar':
         void setSidebarOpen(!sidebarOpen);
+        break;
+      case 'check-updates':
+        void checkUpdates();
         break;
       default:
         break;
     }
   }
 
+  function isMarkdownPath(filePath: string): boolean {
+    return /\.(md|markdown|mdown|mkd)$/i.test(filePath);
+  }
+
+  async function openPathsWhenReady(paths: string[]) {
+    const markdownPaths = paths.filter(isMarkdownPath);
+    if (!markdownPaths.length) return;
+    if (!sessionRestoreComplete) {
+      deferredOpenPaths.push(...markdownPaths);
+      return;
+    }
+    for (const filePath of markdownPaths) void openWorkspaceFile(filePath);
+  }
+
+  function flushDeferredOpenPaths() {
+    sessionRestoreComplete = true;
+    const queued = deferredOpenPaths.splice(0);
+    for (const filePath of queued) void openWorkspaceFile(filePath);
+  }
+
   onMount(() => {
     appPlatform = detectPlatform();
     document.documentElement.dataset.platform = appPlatform;
-    void restoreState();
+    const restorePromise = restoreState().finally(() => {
+      flushDeferredOpenPaths();
+    });
     pollTimer = setInterval(() => void checkExternalChanges(), 2000);
     const onKeydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -617,10 +817,22 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         return;
       }
       if (paletteOpen || settingsOpen || namePrompt || conflictOpen) return;
+      // macOS/Linux native menus own accelerators; handling them here double-fires.
+      if (isDesktop() && (appPlatform === 'macos' || appPlatform === 'linux')) return;
       if (!(event.metaKey || event.ctrlKey)) return;
       if (event.key.toLowerCase() === 'f' && !event.shiftKey) {
         event.preventDefault();
-        findRequest += 1;
+        requestFind();
+        return;
+      }
+      if (event.key === 'Tab') {
+        event.preventDefault();
+        cycleTab(event.shiftKey ? -1 : 1);
+        return;
+      }
+      if (event.key.toLowerCase() === 'w') {
+        event.preventDefault();
+        closeTab(activeId);
         return;
       }
       if (event.key.toLowerCase() === 's') {
@@ -647,6 +859,9 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       } else if (event.key.toLowerCase() === 'p' && event.shiftKey) {
         event.preventDefault();
         openCommandPalette();
+      } else if (event.key === ',') {
+        event.preventDefault();
+        openSettings();
       }
     };
     window.addEventListener('keydown', onKeydown);
@@ -664,15 +879,16 @@ Try editing this document, or open a Markdown file from the toolbar.`;
           runMenuCommand(payload);
         });
         const openUnlisten = await listen<string[]>('open-paths', ({ payload }) => {
-          for (const path of payload) void openWorkspaceFile(path);
+          void openPathsWhenReady(payload);
         });
         teardowns.push(menuUnlisten, openUnlisten);
-        for (const path of await takePendingOpenPaths()) void openWorkspaceFile(path);
+        await restorePromise;
+        await openPathsWhenReady(await takePendingOpenPaths());
       });
       void import('@tauri-apps/api/webviewWindow').then(async ({ getCurrentWebviewWindow }) => {
         const unlistenDrop = await getCurrentWebviewWindow().onDragDropEvent((event) => {
           if (event.payload.type !== 'drop') return;
-          for (const path of event.payload.paths) void openWorkspaceFile(path);
+          void openPathsWhenReady(event.payload.paths);
         });
         teardowns.push(unlistenDrop);
       });
@@ -698,7 +914,13 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     };
   }
 
+  function enableSessionPersist() {
+    // Do not resurrect session writes when restore is off (preserves on-disk session).
+    if (settings.restoreSession) sessionPersistEnabled = true;
+  }
+
   function updateContent(content: string) {
+    enableSessionPersist();
     tabs = tabs.map((tab) => (tab.id === activeId ? { ...tab, content } : tab));
     schedulePersistence();
   }
@@ -708,6 +930,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   function newDocument() {
+    enableSessionPersist();
     const tab = createTab();
     tabs = [...tabs, tab];
     activeId = tab.id;
@@ -715,9 +938,32 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   function addDocument(document: FileDocument) {
-    const existing = tabs.find((tab) => tab.path === document.path);
+    enableSessionPersist();
+    const existing = tabs.find((tab) => pathsReferToSameFile(tab.path, document.path));
     if (existing) {
+      if (existing.content === existing.savedContent) {
+        tabs = tabs.map((tab) =>
+          tab.id === existing.id
+            ? {
+                ...tab,
+                name: document.name,
+                content: document.content,
+                savedContent: document.content,
+                fingerprint: document.fingerprint,
+                conflict: false,
+              }
+            : tab
+        );
+        status = `Reloaded ${document.name}`;
+      } else if (existing.fingerprint?.hash !== document.fingerprint.hash) {
+        tabs = tabs.map((tab) =>
+          tab.id === existing.id ? { ...tab, conflict: true } : tab
+        );
+        openConflict(existing.id);
+        status = `${document.name} changed on disk`;
+      }
       activeId = existing.id;
+      schedulePersistence();
       return;
     }
     const tab = {
@@ -759,6 +1005,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   async function adoptWorkspace(root: string, entries: WorkspaceEntry[]) {
+    enableSessionPersist();
     workspaceRoot = root;
     workspaceFiles = entries;
     expandedDirectories.clear();
@@ -867,9 +1114,13 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       const previousPath = node.path;
       // Keep any open tab pointing at the renamed file on disk.
       tabs = tabs.map((tab) =>
-        tab.path === previousPath ? { ...tab, path: entry.path, name: entry.name } : tab
+        pathsReferToSameFile(tab.path, previousPath)
+          ? { ...tab, path: entry.path, name: entry.name, fingerprint: null }
+          : tab
       );
-      recentFiles = recentFiles.map((path) => (path === previousPath ? entry.path : path));
+      recentFiles = recentFiles.map((path) =>
+        pathsReferToSameFile(path, previousPath) ? entry.path : path
+      );
       await refreshWorkspace();
       status = `Renamed to ${entry.relativePath}`;
       schedulePersistence();
@@ -880,20 +1131,20 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
   async function deleteWorkspaceEntry(node: FlatWorkspaceNode) {
     if (!workspaceRoot || !node.path) return;
-    const openTab = tabs.find((tab) => tab.path === node.path);
+    const openTab = tabs.find((tab) => pathsReferToSameFile(tab.path, node.path));
     const warning = openTab
       ? `\n\n${node.name} is open in Tuxedo MD. Its tab will keep your text as an unsaved draft.`
       : '';
     if (!confirm(`Delete ${node.name}? This cannot be undone.${warning}`)) return;
     try {
       await deleteWorkspaceDocument(workspaceRoot, node.path);
-      // Detach the open tab so its content survives as a recoverable draft.
+      // Detach the open tab so its content survives; preserve real dirty state.
       tabs = tabs.map((tab) =>
-        tab.path === node.path
-          ? { ...tab, path: null, savedContent: '', fingerprint: null, conflict: false }
+        pathsReferToSameFile(tab.path, node.path)
+          ? { ...tab, path: null, fingerprint: null, conflict: false }
           : tab
       );
-      recentFiles = recentFiles.filter((path) => path !== node.path);
+      recentFiles = recentFiles.filter((path) => !pathsReferToSameFile(path, node.path));
       await refreshWorkspace();
       status = `Deleted ${node.name}`;
       schedulePersistence();
@@ -923,23 +1174,26 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       searchSubmitted = false;
       return;
     }
+    const requestId = ++searchRequestId;
     searchRunning = true;
     searchSubmitted = true;
     try {
       // Verified natively as well, so a tampered frontend cannot reach the index.
       await requireCapability('workspaceSearch');
       const outcome = await searchWorkspace(workspaceRoot, searchQuery, searchCaseSensitive);
+      if (requestId !== searchRequestId) return;
       searchResults = outcome.matches;
       searchTruncated = outcome.truncated;
       status = `${outcome.matches.length}${outcome.truncated ? '+' : ''} ${
         outcome.matches.length === 1 ? 'match' : 'matches'
       } across ${outcome.scannedFiles} files`;
     } catch (error) {
+      if (requestId !== searchRequestId) return;
       searchResults = [];
       searchTruncated = false;
       status = readableError(error);
     } finally {
-      searchRunning = false;
+      if (requestId === searchRequestId) searchRunning = false;
     }
   }
 
@@ -975,6 +1229,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   function searchForTag(tag: string) {
     searchQuery = `#${tag}`;
     drawerPanel = 'search';
+    void setSidebarOpen(true);
     void runWorkspaceSearch();
   }
 
@@ -1004,43 +1259,151 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     sidebarOpen = true;
   }
 
-  async function saveActive(saveAs = false) {
-    if (!activeTab) return;
+  async function saveTab(tabId: string, saveAs = false) {
+    const tab = tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
     if (!isDesktop()) {
       status = 'Native saving is available in the desktop app';
       return;
     }
+    if (saveInFlightIds.has(tabId)) return;
+    if (cancelledSaveTabIds.has(tabId)) {
+      // Sticky cancel from a prior discard — only a later non-cancelled start clears it.
+      cancelledSaveTabIds.delete(tabId);
+    }
+    saveInFlightIds.add(tabId);
+    const contentToWrite = tab.content;
+    const priorFingerprint = tab.fingerprint;
+    const revertContent = tab.savedContent;
     try {
-      const path =
-        saveAs || !activeTab.path ? await chooseSavePath(activeTab.path) : activeTab.path;
+      const path = saveAs || !tab.path ? await chooseSavePath(tab.path) : tab.path;
       if (!path) return;
-      const fingerprint = await writeDocument(
-        path,
-        activeTab.content,
-        activeTab.fingerprint,
-        false
+      if (cancelledSaveTabIds.has(tabId)) {
+        cancelledSaveTabIds.delete(tabId);
+        return;
+      }
+      const owner = tabs.find(
+        (candidate) => candidate.id !== tabId && pathsReferToSameFile(candidate.path, path)
       );
-      const name = path.split(/[\\/]/).at(-1) ?? activeTab.name;
-      tabs = tabs.map((tab) =>
-        tab.id === activeId
-          ? { ...tab, path, name, savedContent: tab.content, fingerprint, conflict: false }
-          : tab
+      if (owner) {
+        status = `Already open in another tab: ${owner.name}`;
+        activeId = owner.id;
+        return;
+      }
+      const fingerprint = await writeDocument(path, contentToWrite, priorFingerprint, false);
+      if (cancelledSaveTabIds.has(tabId)) {
+        cancelledSaveTabIds.delete(tabId);
+        // Discard won the race: put the pre-edit bytes back on disk.
+        if (revertContent !== contentToWrite) {
+          try {
+            await writeDocument(path, revertContent, fingerprint, true);
+          } catch (error) {
+            console.error('Failed to revert discarded save', error);
+          }
+        }
+        return;
+      }
+      const name = path.split(/[\\/]/).at(-1) ?? tab.name;
+      tabs = tabs.map((item) =>
+        item.id === tabId
+          ? {
+              ...item,
+              path,
+              name,
+              // Mark only the written bytes as saved so mid-save edits stay dirty.
+              savedContent: contentToWrite,
+              fingerprint,
+              conflict: false,
+            }
+          : item
       );
       status = `Saved ${name}`;
       recentFiles = remember(recentFiles, path);
       schedulePersistence();
     } catch (error) {
+      if (cancelledSaveTabIds.has(tabId)) {
+        cancelledSaveTabIds.delete(tabId);
+        return;
+      }
       if (readableError(error).includes('changed on disk')) {
-        tabs = tabs.map((tab) => (tab.id === activeId ? { ...tab, conflict: true } : tab));
-        openConflict(activeId);
+        tabs = tabs.map((item) => (item.id === tabId ? { ...item, conflict: true } : item));
+        openConflict(tabId);
         status = 'Save paused: file changed outside Tuxedo MD';
       } else status = readableError(error);
+    } finally {
+      saveInFlightIds.delete(tabId);
     }
+  }
+
+  async function saveActive(saveAs = false) {
+    if (!activeId) return;
+    await saveTab(activeId, saveAs);
+  }
+
+  async function openExternalUrl(href: string) {
+    if (!/^(https?:|mailto:)/i.test(href)) {
+      throw new Error('Only http(s) and mailto links can be opened externally');
+    }
+    if (isDesktop()) {
+      const { openUrl } = await import('@tauri-apps/plugin-opener');
+      await openUrl(href);
+      return;
+    }
+    window.open(href, '_blank', 'noopener,noreferrer');
+  }
+
+  async function handlePreviewClick(event: MouseEvent) {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const anchor = target.closest('a');
+    if (!(anchor instanceof HTMLAnchorElement)) return;
+    const href = anchor.getAttribute('href');
+    if (!href || href.startsWith('#')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      if (/^(https?:|mailto:)/i.test(href)) {
+        await openExternalUrl(href);
+        return;
+      }
+      if (workspaceRoot && isDesktop()) {
+        const from = activeRelativePath || activeTab?.name || 'index.md';
+        const refs: DocumentReferences[] = workspaceFiles.map((entry) => ({
+          path: entry.path,
+          relativePath: entry.relativePath,
+          name: entry.name,
+          links: [],
+          tags: [],
+        }));
+        const resolved =
+          resolveReference(from, href, refs) ??
+          resolveReference(from, href.replace(/^\.?\//, ''), refs);
+        if (!resolved) {
+          status = `Could not resolve link: ${href}`;
+          return;
+        }
+        await openWorkspaceRelative(resolved);
+      }
+    } catch (error) {
+      status = readableError(error);
+    }
+  }
+
+  function cycleTab(direction: 1 | -1) {
+    if (tabs.length < 2) return;
+    const index = tabs.findIndex((tab) => tab.id === activeId);
+    const next = (index + direction + tabs.length) % tabs.length;
+    activeId = tabs[next].id;
   }
 
   function closeTab(id: string) {
     const tab = tabs.find((candidate) => candidate.id === id);
     if (!tab) return;
+    enableSessionPersist();
+    if (autosaveTimer) {
+      clearTimeout(autosaveTimer);
+      autosaveTimer = undefined;
+    }
 
     const dirty = tab.content !== tab.savedContent;
     let keepDraft = dirty && settings.keepDraftsSilently;
@@ -1049,12 +1412,24 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         `Discard the unsaved draft for ${tab.name}?\nChoose Cancel to keep it available when Tuxedo MD reopens.`
       );
     }
+    if (!keepDraft) cancelledSaveTabIds.add(id);
     if (isDesktop()) {
-      const draftOperation = keepDraft ? saveState(`draft-${id}`, tab) : deleteState(`draft-${id}`);
-      void draftOperation.catch((error) => {
-        console.error('Failed to update recovery draft', error);
-      });
+      void (async () => {
+        try {
+          if (keepDraft) {
+            await saveState(`draft-${id}`, tab);
+            await setDraftIndexed(id, true);
+          } else {
+            await deleteState(`draft-${id}`);
+            await setDraftIndexed(id, false);
+          }
+        } catch (error) {
+          console.error('Failed to update recovery draft', error);
+        }
+      })();
     }
+
+    dismissConflictForTab(id);
 
     if (tabs.length === 1) {
       const replacement = createTab();
@@ -1080,30 +1455,59 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     if (!settings.autosave || !tab?.path || tab.conflict || tab.content === tab.savedContent)
       return;
     if (autosaveTimer) clearTimeout(autosaveTimer);
-    autosaveTimer = setTimeout(() => void saveActive(false), settings.autosaveDelayMs);
+    const tabId = tab.id;
+    autosaveTimer = setTimeout(() => {
+      const current = tabs.find((item) => item.id === tabId);
+      if (!current?.path || current.conflict || current.content === current.savedContent) return;
+      void saveTab(tabId, false);
+    }, settings.autosaveDelayMs);
   }
 
   async function persistSession() {
-    try {
-      await saveState('settings', settings);
-      const session: SessionState = {
-        version: 1,
-        activeId,
-        mode,
-        workspaceRoot,
-        tabs,
-        recentFiles,
-        recentWorkspaces,
-      };
-      await saveState('session', session);
-      for (const tab of tabs.filter(
-        (item) => !item.path || item.content !== item.savedContent || item.conflict
-      )) {
-        await saveState(`draft-${tab.id}`, tab);
+    if (!isDesktop()) return;
+    const generation = ++persistGeneration;
+    const snapshot = {
+      settings,
+      activeId,
+      mode,
+      workspaceRoot,
+      tabs,
+      recentFiles,
+      recentWorkspaces,
+      sessionPersistEnabled,
+    };
+    persistChain = persistChain.then(async () => {
+      if (generation !== persistGeneration) return;
+      try {
+        await saveState('settings', snapshot.settings);
+        if (generation !== persistGeneration) return;
+        // Live flag cancels stale in-flight writes after restore is turned off.
+        if (snapshot.sessionPersistEnabled && sessionPersistEnabled) {
+          const session: SessionState = {
+            version: 1,
+            activeId: snapshot.activeId,
+            mode: snapshot.mode,
+            workspaceRoot: snapshot.workspaceRoot,
+            tabs: snapshot.tabs,
+            recentFiles: snapshot.recentFiles,
+            recentWorkspaces: snapshot.recentWorkspaces,
+          };
+          await saveState('session', session);
+        }
+        // Draft bodies stay recoverable even when session restore is disabled.
+        for (const tab of snapshot.tabs.filter(
+          (item) => !item.path || item.content !== item.savedContent || item.conflict
+        )) {
+          if (generation !== persistGeneration) return;
+          await saveState(`draft-${tab.id}`, tab);
+          await setDraftIndexed(tab.id, true);
+        }
+      } catch (error) {
+        console.error('Failed to persist session', error);
+        status = `Could not save session: ${readableError(error)}`;
       }
-    } catch {
-      /* Browser preview has no native state store. */
-    }
+    });
+    await persistChain;
   }
 
   async function restoreState() {
@@ -1111,60 +1515,115 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       persistenceReady = true;
       return;
     }
+    let sessionRestored = false;
+    let recoveredCount = 0;
+    let restoreFailed = false;
     try {
       const loadedSettings = await loadState<AppSettings>('settings');
-      if (loadedSettings?.version === 1) settings = { ...defaultSettings, ...loadedSettings };
+      if (loadedSettings?.version === 1) {
+        settings = normalizeSettings(loadedSettings);
+        previousUpdateChannel = settings.updateChannel;
+      }
       const session = await loadState<SessionState>('session');
-      if (!session || session.version !== 1 || !settings.restoreSession || !session.tabs.length)
-        return;
-      tabs = session.tabs;
-      activeId =
-        session.activeId && session.tabs.some((tab) => tab.id === session.activeId)
-          ? session.activeId
-          : session.tabs[0].id;
-      mode = ['source', 'split', 'preview'].includes(session.mode) ? session.mode : 'source';
-      workspaceRoot = session.workspaceRoot;
-      recentFiles = session.recentFiles ?? [];
-      recentWorkspaces = session.recentWorkspaces ?? [];
-      status = 'Session restored';
+      if (session?.version === 1 && settings.restoreSession && session.tabs.length) {
+        tabs = session.tabs;
+        activeId =
+          session.activeId && session.tabs.some((tab) => tab.id === session.activeId)
+            ? session.activeId
+            : session.tabs[0].id;
+        mode = ['source', 'split', 'preview'].includes(session.mode) ? session.mode : 'source';
+        workspaceRoot = session.workspaceRoot;
+        recentFiles = session.recentFiles ?? [];
+        recentWorkspaces = session.recentWorkspaces ?? [];
+        sessionRestored = true;
+      }
+
+      const recovered = await recoverOrphanDrafts(tabs);
+      recoveredCount = recovered.length;
+      if (recovered.length) {
+        const onlyWelcome =
+          tabs.length === 1 &&
+          tabs[0].name === 'Welcome.md' &&
+          tabs[0].content === welcomeMarkdown &&
+          !tabs[0].path;
+        tabs = onlyWelcome && !sessionRestored ? recovered : [...tabs, ...recovered];
+        if (onlyWelcome && !sessionRestored) activeId = recovered[0].id;
+        status = sessionRestored
+          ? `Session restored · ${recovered.length} draft(s) recovered`
+          : `Recovered ${recovered.length} draft(s)`;
+      } else if (sessionRestored) {
+        status = 'Session restored';
+      }
+
+      if (workspaceRoot) {
+        await refreshWorkspace();
+      }
     } catch {
+      restoreFailed = true;
       status = 'Started fresh: saved session could not be restored';
     } finally {
+      // Never rewrite session when restore is off/failed; orphan drafts use draft-index.
+      sessionPersistEnabled = !restoreFailed && settings.restoreSession;
       persistenceReady = true;
+      updatesSupported = await resolveUpdatesSupported();
+      if (updatesSupported && settings.autoCheckUpdates) {
+        void autoCheckUpdates();
+      }
     }
   }
 
   async function checkExternalChanges() {
-    if (!isDesktop()) return;
-    for (const tab of tabs.filter((item) => item.path && !item.conflict)) {
-      try {
-        const disk = await probeDocument(tab.path!);
-        if (disk.fingerprint.hash === tab.fingerprint?.hash) continue;
-        if (tab.content === tab.savedContent) {
-          tabs = tabs.map((item) =>
-            item.id === tab.id
-              ? {
-                  ...item,
-                  content: disk.content,
-                  savedContent: disk.content,
-                  fingerprint: disk.fingerprint,
-                }
-              : item
-          );
-          status = `${tab.name} reloaded from disk`;
-        } else {
-          tabs = tabs.map((item) => (item.id === tab.id ? { ...item, conflict: true } : item));
-          openConflict(tab.id);
+    if (!isDesktop() || externalCheckInFlight) return;
+    externalCheckInFlight = true;
+    try {
+      for (const tab of tabs.filter((item) => item.path && !item.conflict)) {
+        const tabId = tab.id;
+        const path = tab.path!;
+        try {
+          const disk = await probeDocument(path);
+          const live = tabs.find((item) => item.id === tabId);
+          if (!live?.path || live.conflict) continue;
+          if (live.fingerprint?.hash === disk.fingerprint.hash) continue;
+
+          // Restored tabs often lack a fingerprint; adopt it when saved bytes still match disk.
+          if (!live.fingerprint && live.savedContent === disk.content) {
+            tabs = tabs.map((item) =>
+              item.id === tabId ? { ...item, fingerprint: disk.fingerprint } : item
+            );
+            continue;
+          }
+
+          if (live.content === live.savedContent) {
+            tabs = tabs.map((item) =>
+              item.id === tabId
+                ? {
+                    ...item,
+                    content: disk.content,
+                    savedContent: disk.content,
+                    fingerprint: disk.fingerprint,
+                  }
+                : item
+            );
+            status = `${live.name} reloaded from disk`;
+          } else {
+            tabs = tabs.map((item) => (item.id === tabId ? { ...item, conflict: true } : item));
+            openConflict(tabId);
+          }
+        } catch {
+          /* Deleted/unavailable files remain recoverable drafts. */
         }
-      } catch {
-        /* Deleted/unavailable files remain recoverable drafts. */
       }
+    } finally {
+      externalCheckInFlight = false;
     }
   }
 
   async function resolveConflict(action: 'reload' | 'keep') {
     const tab = tabs.find((item) => item.id === conflictTabId);
-    if (!tab?.path) return;
+    if (!tab?.path) {
+      dismissConflictForTab(conflictTabId ?? '');
+      return;
+    }
     try {
       if (action === 'reload') {
         const disk = await probeDocument(tab.path);
@@ -1180,10 +1639,11 @@ Try editing this document, or open a Markdown file from the toolbar.`;
             : item
         );
       } else {
-        const fingerprint = await writeDocument(tab.path, tab.content, tab.fingerprint, true);
+        const contentToWrite = tab.content;
+        const fingerprint = await writeDocument(tab.path, contentToWrite, tab.fingerprint, true);
         tabs = tabs.map((item) =>
           item.id === tab.id
-            ? { ...item, savedContent: item.content, fingerprint, conflict: false }
+            ? { ...item, savedContent: contentToWrite, fingerprint, conflict: false }
             : item
         );
       }
@@ -1193,6 +1653,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       conflictReturnFocus = null;
       restoreFocus(target);
       schedulePersistence();
+      showNextConflict();
     } catch (error) {
       status = readableError(error);
     }
@@ -1203,7 +1664,17 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   function readableError(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+    if (error instanceof Error) return error.message;
+    if (typeof error === 'string') return error;
+    if (error && typeof error === 'object' && 'message' in error) {
+      const message = (error as { message: unknown }).message;
+      if (typeof message === 'string' && message.trim()) return message;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
   }
 
   function handleDrag(e: MouseEvent) {
@@ -1246,7 +1717,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   >
     <div class="titlebar-main" data-tauri-drag-region={isWindowsChrome ? undefined : true}>
       {#if isWindowsChrome}
-        <WindowMenubar oncommand={runMenuCommand} />
+        <WindowMenubar oncommand={runMenuCommand} updatesSupported={updatesSupported} />
         <span class="titlebar-inline-divider" aria-hidden="true"></span>
       {:else}
         <div class="brand" data-tauri-drag-region>
@@ -1256,7 +1727,10 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         </div>
       {/if}
 
-      <div class="titlebar-tabs" data-tauri-drag-region>
+      <div
+        class="titlebar-tabs"
+        data-tauri-drag-region={isWindowsChrome ? undefined : true}
+      >
         {#each tabs as tab (tab.id)}
           <div class:active={tab.id === activeId} class="titlebar-tab">
             <button class="tab-select" onclick={() => (activeId = tab.id)}>
@@ -1317,7 +1791,11 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         </div>
         <span class="toolbar-divider"></span>
         <button class="icon-button" title="Settings" onclick={openSettings}><Settings2 /></button>
-        <button class="icon-button" title="Command palette" onclick={openCommandPalette}>⌘</button>
+        <button
+          class="icon-button"
+          title={`Command palette (${formatShortcut({ mod: true, shift: true, key: 'p' })})`}
+          onclick={openCommandPalette}>{modKeyLabel()}</button
+        >
       </div>
       {#if isWindowsChrome}
         <WindowControls onclose={() => void requestAppClose(hasUnsavedChanges)} />
@@ -1583,32 +2061,35 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
     <main class="main-area">
       <section class:split-layout={mode === 'split'} class="editor-grid">
-        {#if mode !== 'preview'}
-          <div class:nowrap={!settings.lineWrap} class="source-pane">
-            <MarkdownEditor
-              documentId={activeTab?.id ?? 'empty'}
-              value={activeTab?.content ?? ''}
-              showLineNumbers={settings.showLineNumbers}
-              tabSize={settings.tabSize}
-              spellcheck={settings.spellcheck}
-              {findRequest}
-              {revealRequest}
-              onchange={updateContent}
-              onselectionchange={updateSelection}
-            />
-          </div>
-        {/if}
+        <div class="source-pane" class:pane-hidden={mode === 'preview'} aria-hidden={mode === 'preview'}>
+          <MarkdownEditor
+            documentId={activeTab?.id ?? 'empty'}
+            value={activeTab?.content ?? ''}
+            selection={activeTab?.selection ?? { anchor: 0, head: 0 }}
+            showLineNumbers={settings.showLineNumbers}
+            tabSize={settings.tabSize}
+            spellcheck={settings.spellcheck}
+            lineWrap={settings.lineWrap}
+            visible={mode !== 'preview'}
+            retainedDocumentIds={tabs.map((tab) => tab.id)}
+            {findRequest}
+            {revealRequest}
+            onchange={updateContent}
+            onselectionchange={updateSelection}
+          />
+        </div>
         {#if mode !== 'source'}
-          <article class="preview-pane">
+          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+          <div class="preview-pane" role="presentation" onclick={handlePreviewClick}>
             <!-- Preview HTML is produced by rehype-sanitize in src/lib/preview.ts. -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
             <div class="markdown-body preview-{settings.previewFont}">{@html preview}</div>
-          </article>
+          </div>
         {/if}
       </section>
 
       <footer class="statusbar">
-        <span>{editionWarning ?? status}</span>
+        <span>{editionWarning ? `${status} · ${editionWarning}` : status}</span>
         <span
           >{activeTab?.content.length ?? 0} characters · {activeTab?.content.trim()
             ? activeTab.content.trim().split(/\s+/).length
@@ -1845,6 +2326,36 @@ Try editing this document, or open a Markdown file from the toolbar.`;
                 </p>
               {/if}
 
+              {#if updatesSupported}
+                <h3>Updates</h3>
+                <div class="settings-group toggle-group">
+                  <label class="switch-container">
+                    <span>Check for updates automatically</span>
+                    <input type="checkbox" bind:checked={settings.autoCheckUpdates} />
+                    <span class="switch-slider"></span>
+                  </label>
+                </div>
+                <div class="settings-group">
+                  <div class="settings-label">Update channel</div>
+                  <div class="select-wrapper">
+                    <select bind:value={settings.updateChannel}>
+                      <option value="auto">Auto (follow installed build)</option>
+                      <option value="stable">Stable</option>
+                      <option value="beta">Beta</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="settings-group">
+                  <button type="button" class="settings-action" onclick={() => void checkUpdates()}
+                    >Check now</button
+                  >
+                </div>
+                <p class="settings-note">
+                  GitHub releases power in-app updates for direct Windows, macOS, and Linux builds.
+                  Store builds update through the Mac App Store or Microsoft Store instead.
+                </p>
+              {/if}
+
               <div class="licenses-section">
                 <div class="licenses-header">
                   <h5>Third-party Licenses</h5>
@@ -1905,7 +2416,13 @@ Try editing this document, or open a Markdown file from the toolbar.`;
                                 <a
                                   href={pkgInfo.repository}
                                   target="_blank"
-                                  rel="noopener noreferrer">{pkgInfo.repository}</a
+                                  rel="noopener noreferrer"
+                                  onclick={(event) => {
+                                    event.preventDefault();
+                                    void openExternalUrl(pkgInfo.repository!).catch((error) => {
+                                      status = readableError(error);
+                                    });
+                                  }}>{pkgInfo.repository}</a
                                 >
                               </p>
                             {/if}

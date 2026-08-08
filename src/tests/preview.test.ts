@@ -12,4 +12,19 @@ describe('renderMarkdown', () => {
     const html = await renderMarkdown('<script>alert(1)</script>');
     expect(html).not.toContain('<script>');
   });
+
+  it('strips remote image beacons and exotic link protocols', async () => {
+    const html = await renderMarkdown(
+      '![tracker](https://evil.example/pixel.png)\n\n[chat](irc://irc.example/tuxedo)'
+    );
+    expect(html).not.toContain('https://evil.example/pixel.png');
+    expect(html).not.toContain('irc://');
+    expect(html).toContain('<img');
+  });
+
+  it('keeps http(s) and mailto links', async () => {
+    const html = await renderMarkdown('[site](https://example.com) [mail](mailto:a@b.c)');
+    expect(html).toContain('href="https://example.com"');
+    expect(html).toContain('href="mailto:a@b.c"');
+  });
 });

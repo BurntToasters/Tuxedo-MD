@@ -2,20 +2,27 @@
   import {
     buildEditMenu,
     buildFileMenu,
+    buildHelpMenu,
     buildViewMenu,
     type MenuCommandId,
     type MenuEntry,
   } from '../menu-commands';
 
-  type MenuName = 'File' | 'Edit' | 'View';
+  type MenuName = 'File' | 'Edit' | 'View' | 'Help';
 
-  let { oncommand }: { oncommand: (id: MenuCommandId) => void } = $props();
+  let {
+    oncommand,
+    updatesSupported = false,
+  }: { oncommand: (id: MenuCommandId | string) => void; updatesSupported?: boolean } = $props();
 
-  const menuGroups = $derived([
-    { name: 'File' as const, entries: buildFileMenu() },
-    { name: 'Edit' as const, entries: buildEditMenu() },
-    { name: 'View' as const, entries: buildViewMenu() },
-  ]);
+  const menuGroups = $derived(
+    [
+      { name: 'File' as const, entries: buildFileMenu() },
+      { name: 'Edit' as const, entries: buildEditMenu() },
+      { name: 'View' as const, entries: buildViewMenu() },
+      { name: 'Help' as const, entries: buildHelpMenu(updatesSupported) },
+    ].filter((group) => group.entries.length > 0)
+  );
 
   let openMenu = $state<MenuName | null>(null);
   let dropdownStyle = $state('');
