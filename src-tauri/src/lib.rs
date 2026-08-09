@@ -40,6 +40,13 @@ enum AppError {
     InvalidStateKey,
     #[error("The target path is outside the open workspace folder")]
     OutsideWorkspace,
+    #[error("Open a workspace folder before scanning or searching")]
+    WorkspaceNotAdopted,
+    #[error("That document path is not available")]
+    PathNotConsented,
+    #[allow(dead_code)]
+    #[error("A different workspace folder is already open")]
+    WorkspaceMismatch,
     #[error("Only Markdown documents can be created, renamed, or deleted here")]
     NotMarkdown,
     #[error("A file with that name already exists")]
@@ -55,6 +62,9 @@ enum AppError {
     #[error("{0}")]
     Walk(#[from] walkdir::Error),
 }
+
+struct AdoptedWorkspace(Mutex<Option<PathBuf>>);
+struct ConsentedPaths(Mutex<HashSet<PathBuf>>);
 
 impl Serialize for AppError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -154,6 +164,8 @@ enum EditionCapability {
 }
 
 impl EditionCapability {
+    /// Full capability registry including Phase 3 placeholders (not exposed until shipped).
+    #[allow(dead_code)]
     const ALL: [Self; 11] = [
         Self::WorkspaceSearch,
         Self::Backlinks,
@@ -166,6 +178,15 @@ impl EditionCapability {
         Self::DocumentRecipes,
         Self::WorkspaceIntelligence,
         Self::FocusSessionPresets,
+    ];
+
+    /// Capabilities that are implemented and enforced today (not Phase 3 placeholders).
+    const SHIPPED: [Self; 5] = [
+        Self::WorkspaceSearch,
+        Self::Backlinks,
+        Self::WikiLinks,
+        Self::Tags,
+        Self::WorkspaceIntelligence,
     ];
 
     fn label(self) -> &'static str {
@@ -191,9 +212,111 @@ struct BuildInfo {
     edition: Edition,
     version: &'static str,
     capabilities: Vec<EditionCapability>,
+    /// True for Mac App Store / opaque-window builds that must not clear the window.
+    opaque_window: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DocumentProbe {
+    path: String,
+    name: String,
+    fingerprint: DocumentFingerprint,
+}
+
+fn require_markdown_document(path: &Path) -> Result<(), AppError> {
+    if !is_markdown(path) {
+        return Err(AppError::NotMarkdown);
+    }
+    Ok(())
+}
+
+/// Canonicalize an existing path, or parent + filename when the file does not exist yet.
+fn canonicalize_document_path(path: &Path) -> Result<PathBuf, AppError> {
+    if path.exists() {
+        return Ok(fs::canonicalize(path)?);
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing file name")
+    })?;
+    Ok(fs::canonicalize(parent)?.join(file_name))
+}
+
+/// True when `path` appears under the adopted workspace via a junction/symlink, but
+/// its canonical target lies outside — consent must not follow that escape.
+fn consent_escapes_adopted(adopted: Option<&Path>, path: &Path, canonical: &Path) -> bool {
+    let Some(adopted) = adopted else {
+        return false;
+    };
+    if canonical.starts_with(adopted) {
+        return false;
+    }
+    let mut current = path.to_path_buf();
+    while current.pop() {
+        if let Ok(ancestor) = fs::canonicalize(&current) {
+            if ancestor.starts_with(adopted) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn consent_path(app: &AppHandle, path: &Path) -> Result<PathBuf, AppError> {
+    let canonical = canonicalize_document_path(path)?;
+    let adopted = {
+        let state = app.state::<AdoptedWorkspace>();
+        let guard = state
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.clone()
+    };
+    if consent_escapes_adopted(adopted.as_deref(), path, &canonical) {
+        return Err(AppError::OutsideWorkspace);
+    }
+    let state = app.state::<ConsentedPaths>();
+    let mut guard = state
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.insert(canonical.clone());
+    Ok(canonical)
+}
+
+fn is_under_adopted(app: &AppHandle, canonical: &Path) -> bool {
+    let state = app.state::<AdoptedWorkspace>();
+    let guard = state
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match guard.as_ref() {
+        Some(adopted) => canonical.starts_with(adopted),
+        None => false,
+    }
+}
+
+fn allow_document_access(app: &AppHandle, path: &Path) -> Result<PathBuf, AppError> {
+    require_markdown_document(path)?;
+    let canonical = canonicalize_document_path(path)?;
+    let consented = {
+        let state = app.state::<ConsentedPaths>();
+        let guard = state
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.contains(&canonical)
+    };
+    if consented || is_under_adopted(app, &canonical) {
+        Ok(canonical)
+    } else {
+        Err(AppError::PathNotConsented)
+    }
 }
 
 fn read_document(path: &Path) -> Result<FileDocument, AppError> {
+    require_markdown_document(path)?;
     let metadata = fs::metadata(path)?;
     if !metadata.is_file() {
         return Err(AppError::NotAFile);
@@ -218,8 +341,9 @@ fn read_document(path: &Path) -> Result<FileDocument, AppError> {
 }
 
 #[tauri::command]
-fn open_document(path: PathBuf) -> Result<FileDocument, AppError> {
-    read_document(&path)
+fn open_document(app: AppHandle, path: PathBuf) -> Result<FileDocument, AppError> {
+    let canonical = allow_document_access(&app, &path)?;
+    read_document(&canonical)
 }
 
 fn fingerprint(path: &Path, metadata: &fs::Metadata) -> Result<DocumentFingerprint, AppError> {
@@ -235,13 +359,29 @@ fn fingerprint(path: &Path, metadata: &fs::Metadata) -> Result<DocumentFingerpri
     })
 }
 
+fn fingerprint_light(metadata: &fs::Metadata) -> Result<DocumentFingerprint, AppError> {
+    let modified_ms = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    Ok(DocumentFingerprint {
+        modified_ms,
+        size: metadata.len(),
+        hash: String::new(),
+    })
+}
+
 #[tauri::command]
 fn save_document(
+    app: AppHandle,
     path: PathBuf,
     content: String,
     expected_fingerprint: Option<DocumentFingerprint>,
     force: bool,
 ) -> Result<DocumentFingerprint, AppError> {
+    // Parent must already exist so new Save As targets can be canonicalized.
+    let path = allow_document_access(&app, &path)?;
     if content.len() as u64 > MAX_DOCUMENT_BYTES {
         return Err(AppError::FileTooLarge);
     }
@@ -275,13 +415,44 @@ fn save_document(
         let _ = fs::remove_file(&temporary);
     }
     result.map_err(AppError::from)?;
+    consent_path(&app, &path)?;
     let metadata = fs::metadata(&path)?;
     fingerprint(&path, &metadata)
 }
 
 #[tauri::command]
-fn probe_document(path: PathBuf) -> Result<FileDocument, AppError> {
-    read_document(&path)
+fn probe_document(app: AppHandle, path: PathBuf) -> Result<FileDocument, AppError> {
+    let canonical = allow_document_access(&app, &path)?;
+    read_document(&canonical)
+}
+
+/// Lightweight external-change check: metadata only, no content read or hash.
+#[tauri::command]
+fn probe_document_meta(app: AppHandle, path: PathBuf) -> Result<DocumentProbe, AppError> {
+    let canonical = allow_document_access(&app, &path)?;
+    let metadata = fs::metadata(&canonical)?;
+    if !metadata.is_file() {
+        return Err(AppError::NotAFile);
+    }
+    if metadata.len() > MAX_DOCUMENT_BYTES {
+        return Err(AppError::FileTooLarge);
+    }
+    Ok(DocumentProbe {
+        name: canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Untitled.md")
+            .to_owned(),
+        path: canonical.to_string_lossy().into_owned(),
+        fingerprint: fingerprint_light(&metadata)?,
+    })
+}
+
+#[tauri::command]
+fn register_consented_path(app: AppHandle, path: PathBuf) -> Result<(), AppError> {
+    require_markdown_document(&path)?;
+    consent_path(&app, &path)?;
+    Ok(())
 }
 
 fn is_valid_state_key(key: &str) -> bool {
@@ -306,8 +477,21 @@ fn state_file(app: &AppHandle, key: &str) -> Result<PathBuf, AppError> {
 #[tauri::command]
 fn load_app_state(app: AppHandle, key: String) -> Result<Option<String>, AppError> {
     let path = state_file(&app, &key)?;
+    let metadata = match fs::metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.len() > MAX_APP_STATE_BYTES {
+        return Err(AppError::AppStateTooLarge);
+    }
     match fs::read_to_string(path) {
-        Ok(contents) => Ok(Some(contents)),
+        Ok(contents) => {
+            if contents.len() as u64 > MAX_APP_STATE_BYTES {
+                return Err(AppError::AppStateTooLarge);
+            }
+            Ok(Some(contents))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
@@ -339,11 +523,17 @@ fn write_replacement(path: &Path, content: &[u8]) -> Result<(), AppError> {
         ".{}.tmp",
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
-    let mut file = fs::File::create(&temporary)?;
-    file.write_all(content)?;
-    file.sync_all()?;
-    replace_file(&temporary, path)?;
-    Ok(())
+    let result = (|| -> Result<(), std::io::Error> {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(content)?;
+        file.sync_all()?;
+        replace_file(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.map_err(AppError::from)
 }
 
 #[cfg(not(windows))]
@@ -384,8 +574,18 @@ fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     }
 }
 
+/// `root` must already be canonical. Returns true when `path` canonicalizes under it.
+fn path_confined_to_root(root: &Path, path: &Path) -> bool {
+    match fs::canonicalize(path) {
+        Ok(canonical) => canonical.starts_with(root),
+        Err(_) => false,
+    }
+}
+
 /// Collects Markdown files beneath `root`, honoring the shared ignore rules and the
 /// workspace size ceiling. Shared by the scan, search, and reference commands.
+/// `root` must already be canonical; each file is re-canonicalized and dropped if it
+/// escapes the root (e.g. via a directory junction that WalkDir did not follow as a link).
 fn walk_markdown_files(root: &Path) -> Result<Vec<PathBuf>, AppError> {
     if !root.is_dir() {
         return Err(AppError::NotADirectory);
@@ -401,19 +601,68 @@ fn walk_markdown_files(root: &Path) -> Result<Vec<PathBuf>, AppError> {
         if !entry.file_type().is_file() || !is_markdown(entry.path()) {
             continue;
         }
+        if !path_confined_to_root(root, entry.path()) {
+            continue;
+        }
+        let Ok(canonical) = fs::canonicalize(entry.path()) else {
+            continue;
+        };
         if files.len() >= MAX_WORKSPACE_FILES {
             return Err(AppError::WorkspaceTooLarge);
         }
-        files.push(entry.path().to_path_buf());
+        files.push(canonical);
     }
     Ok(files)
 }
 
+fn adopt_workspace(app: &AppHandle, root: &Path) -> Result<PathBuf, AppError> {
+    let canonical = fs::canonicalize(root)?;
+    if !canonical.is_dir() {
+        return Err(AppError::NotADirectory);
+    }
+    {
+        let state = app.state::<AdoptedWorkspace>();
+        let mut guard = state
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some(canonical.clone());
+    }
+    // Drop consents that no longer sit under the newly adopted root.
+    {
+        let state = app.state::<ConsentedPaths>();
+        let mut guard = state
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.retain(|path| path.starts_with(&canonical));
+    }
+    Ok(canonical)
+}
+
+fn require_adopted_workspace(app: &AppHandle, root: &Path) -> Result<PathBuf, AppError> {
+    let canonical = fs::canonicalize(root)?;
+    let state = app.state::<AdoptedWorkspace>();
+    let guard = state
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match guard.as_ref() {
+        Some(adopted) if *adopted == canonical => Ok(canonical),
+        _ => Err(AppError::WorkspaceNotAdopted),
+    }
+}
+
+/// Force-adopt a workspace root (folder dialog / intentional switch). Returns the canonical path.
 #[tauri::command]
-fn scan_workspace(root: PathBuf) -> Result<Vec<WorkspaceEntry>, AppError> {
-    // Canonicalized here so the paths handed to the UI match the ones the search,
-    // reference, and mutation commands produce for the same files.
-    let canonical_root = fs::canonicalize(&root)?;
+fn adopt_workspace_folder(app: AppHandle, root: PathBuf) -> Result<String, AppError> {
+    let canonical = adopt_workspace(&app, &root)?;
+    Ok(canonical.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn scan_workspace(app: AppHandle, root: PathBuf) -> Result<Vec<WorkspaceEntry>, AppError> {
+    let canonical_root = require_adopted_workspace(&app, &root)?;
     let paths = walk_markdown_files(&canonical_root)?;
     let mut files: Vec<WorkspaceEntry> = paths
         .iter()
@@ -439,11 +688,13 @@ fn preview_line(line: &str) -> String {
 
 #[tauri::command]
 fn search_workspace(
+    app: AppHandle,
     root: PathBuf,
     query: String,
     case_sensitive: bool,
 ) -> Result<SearchOutcome, AppError> {
     require_capability(EditionCapability::WorkspaceSearch)?;
+    let canonical_root = require_adopted_workspace(&app, &root)?;
 
     let trimmed = query.trim();
     if trimmed.is_empty() {
@@ -459,7 +710,6 @@ fn search_workspace(
         trimmed.to_lowercase()
     };
 
-    let canonical_root = fs::canonicalize(&root)?;
     let mut matches = Vec::new();
     let mut truncated = false;
     let mut scanned_files = 0usize;
@@ -663,7 +913,10 @@ fn extract_references(content: &str) -> (Vec<String>, Vec<String>) {
 }
 
 #[tauri::command]
-fn collect_workspace_references(root: PathBuf) -> Result<Vec<DocumentReferences>, AppError> {
+fn collect_workspace_references(
+    app: AppHandle,
+    root: PathBuf,
+) -> Result<Vec<DocumentReferences>, AppError> {
     // Any one of these Pro capabilities consumes this payload; the frontend gates each
     // surface separately, and this keeps a Community build from obtaining the data at all.
     require_any_capability(&[
@@ -672,8 +925,7 @@ fn collect_workspace_references(root: PathBuf) -> Result<Vec<DocumentReferences>
         EditionCapability::Tags,
         EditionCapability::WorkspaceIntelligence,
     ])?;
-
-    let canonical_root = fs::canonicalize(&root)?;
+    let canonical_root = require_adopted_workspace(&app, &root)?;
     let mut documents = Vec::new();
 
     for path in walk_markdown_files(&canonical_root)? {
@@ -736,6 +988,15 @@ fn validate_file_name(name: &str) -> Result<(), AppError> {
         || trimmed.contains('/')
         || trimmed.contains('\\')
         || trimmed.contains('\0')
+        || trimmed.contains(':')
+        || trimmed.contains('<')
+        || trimmed.contains('>')
+        || trimmed.contains('"')
+        || trimmed.contains('|')
+        || trimmed.contains('?')
+        || trimmed.contains('*')
+        || trimmed.ends_with('.')
+        || trimmed.ends_with(' ')
         || trimmed.chars().any(|character| character.is_control())
     {
         return Err(AppError::InvalidFileName);
@@ -829,11 +1090,13 @@ fn workspace_entry(root: &Path, path: &Path) -> WorkspaceEntry {
 
 #[tauri::command]
 fn create_workspace_document(
+    app: AppHandle,
     root: PathBuf,
     path: PathBuf,
     content: String,
 ) -> Result<WorkspaceEntry, AppError> {
-    let target = resolve_inside_workspace(&root, &path)?;
+    let canonical_root = require_adopted_workspace(&app, &root)?;
+    let target = resolve_inside_workspace(&canonical_root, &path)?;
     // symlink_metadata catches broken symlinks that exists() would miss (write-through escape).
     match fs::symlink_metadata(&target) {
         Ok(_) => return Err(AppError::AlreadyExists),
@@ -844,7 +1107,6 @@ fn create_workspace_document(
         return Err(AppError::FileTooLarge);
     }
     write_replacement(&target, content.as_bytes())?;
-    let canonical_root = fs::canonicalize(&root)?;
     let canonical_target = fs::canonicalize(&target)?;
     Ok(workspace_entry(&canonical_root, &canonical_target))
 }
@@ -865,28 +1127,26 @@ fn is_markdown_file_entry(path: &Path) -> Result<bool, AppError> {
     }
 }
 
-#[tauri::command]
-fn rename_workspace_document(
-    root: PathBuf,
+fn rename_workspace_document_inner(
+    adopted_root: &Path,
     path: PathBuf,
     new_name: String,
 ) -> Result<WorkspaceEntry, AppError> {
-    let source = resolve_inside_workspace(&root, &path)?;
+    let source = resolve_inside_workspace(adopted_root, &path)?;
     if !is_markdown_file_entry(&source)? {
         return Err(AppError::NotAFile);
     }
     validate_file_name(&new_name)?;
     let destination = resolve_inside_workspace(
-        &root,
+        adopted_root,
         &source
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join(new_name.trim()),
     )?;
     if destination == source {
-        let canonical_root = fs::canonicalize(&root)?;
         let reported = fs::canonicalize(&source).unwrap_or(source);
-        return Ok(workspace_entry(&canonical_root, &reported));
+        return Ok(workspace_entry(adopted_root, &reported));
     }
     match fs::symlink_metadata(&destination) {
         Ok(_) => return Err(AppError::AlreadyExists),
@@ -894,15 +1154,24 @@ fn rename_workspace_document(
         Err(error) => return Err(error.into()),
     }
     fs::rename(&source, &destination)?;
-    let canonical_root = fs::canonicalize(&root)?;
     // Dangling markdown symlinks cannot be canonicalized; the resolved path stays in-root.
     let reported = fs::canonicalize(&destination).unwrap_or(destination);
-    Ok(workspace_entry(&canonical_root, &reported))
+    Ok(workspace_entry(adopted_root, &reported))
 }
 
 #[tauri::command]
-fn delete_workspace_document(root: PathBuf, path: PathBuf) -> Result<(), AppError> {
-    let target = resolve_inside_workspace(&root, &path)?;
+fn rename_workspace_document(
+    app: AppHandle,
+    root: PathBuf,
+    path: PathBuf,
+    new_name: String,
+) -> Result<WorkspaceEntry, AppError> {
+    let canonical_root = require_adopted_workspace(&app, &root)?;
+    rename_workspace_document_inner(&canonical_root, path, new_name)
+}
+
+fn delete_workspace_document_inner(adopted_root: &Path, path: PathBuf) -> Result<(), AppError> {
+    let target = resolve_inside_workspace(adopted_root, &path)?;
     if !is_markdown_file_entry(&target)? {
         return Err(AppError::NotAFile);
     }
@@ -910,10 +1179,16 @@ fn delete_workspace_document(root: PathBuf, path: PathBuf) -> Result<(), AppErro
     Ok(())
 }
 
+#[tauri::command]
+fn delete_workspace_document(app: AppHandle, root: PathBuf, path: PathBuf) -> Result<(), AppError> {
+    let canonical_root = require_adopted_workspace(&app, &root)?;
+    delete_workspace_document_inner(&canonical_root, path)
+}
+
 fn capabilities_for_edition(edition: Edition) -> Vec<EditionCapability> {
     match edition {
         Edition::Community => Vec::new(),
-        Edition::Full => EditionCapability::ALL.to_vec(),
+        Edition::Full => EditionCapability::SHIPPED.to_vec(),
     }
 }
 
@@ -957,6 +1232,7 @@ fn get_build_info() -> BuildInfo {
         edition,
         version: env!("CARGO_PKG_VERSION"),
         capabilities: capabilities_for_edition(edition),
+        opaque_window: cfg!(feature = "mas"),
     }
 }
 
@@ -1013,8 +1289,22 @@ fn markdown_paths(arguments: impl IntoIterator<Item = String>) -> Vec<String> {
 }
 
 #[tauri::command]
-fn take_pending_open_paths(state: tauri::State<PendingOpenPaths>) -> Vec<String> {
-    std::mem::take(&mut *state.0.lock().expect("pending open path lock poisoned"))
+fn take_pending_open_paths(app: AppHandle) -> Vec<String> {
+    let paths = {
+        let state = app.state::<PendingOpenPaths>();
+        let mut guard = state
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::mem::take(&mut *guard)
+    };
+    for path_str in &paths {
+        let path = PathBuf::from(path_str);
+        if path.is_file() && is_markdown(&path) {
+            let _ = consent_path(&app, &path);
+        }
+    }
+    paths
 }
 
 fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
@@ -1046,13 +1336,7 @@ fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
                     true,
                     Some("CmdOrCtrl+Shift+S"),
                 )?,
-                &MenuItem::with_id(
-                    handle,
-                    "close-tab",
-                    "Close Tab",
-                    true,
-                    Some("CmdOrCtrl+W"),
-                )?,
+                &MenuItem::with_id(handle, "close-tab", "Close Tab", true, Some("CmdOrCtrl+W"))?,
                 &PredefinedMenuItem::separator(handle)?,
                 // Custom quit so the frontend can confirm unsaved changes first.
                 &MenuItem::with_id(handle, "quit", "Quit", true, Some("CmdOrCtrl+Q"))?,
@@ -1115,7 +1399,13 @@ fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
                     true,
                     Some("CmdOrCtrl+Shift+V"),
                 )?,
-                &MenuItem::with_id(handle, "toggle-focus-mode", "Focus Mode", true, None::<&str>)?,
+                &MenuItem::with_id(
+                    handle,
+                    "toggle-focus-mode",
+                    "Focus Mode",
+                    true,
+                    None::<&str>,
+                )?,
                 &MenuItem::with_id(handle, "settings", "Settings", true, Some("CmdOrCtrl+,"))?,
             ],
         )?;
@@ -1146,10 +1436,7 @@ fn allow_webview_navigation(url: &Url) -> bool {
         "tauri" | "asset" | "ipc" => true,
         "http" | "https" => matches!(
             url.host_str(),
-            Some("localhost")
-                | Some("127.0.0.1")
-                | Some("tauri.localhost")
-                | Some("ipc.localhost")
+            Some("localhost") | Some("127.0.0.1") | Some("tauri.localhost") | Some("ipc.localhost")
         ),
         _ => false,
     }
@@ -1217,16 +1504,22 @@ fn get_licenses(app: tauri::AppHandle) -> Result<String, String> {
             }
         }
 
-        for suffix in &candidate_suffixes {
-            let license_path = std::path::Path::new(suffix);
-            attempted_paths.push(license_path.display().to_string());
-            if let Ok(content) = fs::read_to_string(license_path) {
-                let parsed: serde_json::Value = serde_json::from_str(&content)
-                    .map_err(|e| format!("Failed to parse {}: {}", license_path.display(), e))?;
-                let object = parsed
-                    .as_object()
-                    .ok_or_else(|| format!("{} must be a JSON object", license_path.display()))?;
-                return Ok(Some(object.clone()));
+        // Dev-only CWD fallback so `cargo tauri dev` can load generated license JSON
+        // without bundling; never search the process CWD in release builds.
+        if cfg!(debug_assertions) {
+            for suffix in &candidate_suffixes {
+                let license_path = std::path::Path::new(suffix);
+                attempted_paths.push(license_path.display().to_string());
+                if let Ok(content) = fs::read_to_string(license_path) {
+                    let parsed: serde_json::Value =
+                        serde_json::from_str(&content).map_err(|e| {
+                            format!("Failed to parse {}: {}", license_path.display(), e)
+                        })?;
+                    let object = parsed.as_object().ok_or_else(|| {
+                        format!("{} must be a JSON object", license_path.display())
+                    })?;
+                    return Ok(Some(object.clone()));
+                }
             }
         }
 
@@ -1262,7 +1555,7 @@ fn set_document_edited(window: tauri::WebviewWindow, edited: bool) -> Result<(),
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (window, edited);
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -1284,7 +1577,10 @@ fn set_document_edited(window: tauri::WebviewWindow, edited: bool) -> Result<(),
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let pending_paths = markdown_paths(std::env::args().skip(1));
-    let mut builder = tauri::Builder::default().manage(PendingOpenPaths(Mutex::new(pending_paths)));
+    let mut builder = tauri::Builder::default()
+        .manage(PendingOpenPaths(Mutex::new(pending_paths)))
+        .manage(AdoptedWorkspace(Mutex::new(None)))
+        .manage(ConsentedPaths(Mutex::new(HashSet::new())));
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, arguments, _| {
@@ -1331,12 +1627,15 @@ pub fn run() {
             open_document,
             save_document,
             scan_workspace,
+            adopt_workspace_folder,
             search_workspace,
             collect_workspace_references,
             create_workspace_document,
             rename_workspace_document,
             delete_workspace_document,
             probe_document,
+            probe_document_meta,
+            register_consented_path,
             get_build_info,
             authorize_capability,
             load_app_state,
@@ -1477,8 +1776,9 @@ mod tests {
         assert!(capabilities_for_edition(Edition::Community).is_empty());
         assert_eq!(
             capabilities_for_edition(Edition::Full).len(),
-            EditionCapability::ALL.len()
+            EditionCapability::SHIPPED.len()
         );
+        assert!(EditionCapability::SHIPPED.len() < EditionCapability::ALL.len());
     }
 
     #[test]
@@ -1486,15 +1786,154 @@ mod tests {
         if Edition::current() == Edition::Full {
             return;
         }
-        let root = std::env::temp_dir();
-        assert!(search_workspace(root.clone(), "anything".into(), false).is_err());
-        assert!(collect_workspace_references(root).is_err());
+        assert!(require_capability(EditionCapability::WorkspaceSearch).is_err());
+        assert!(require_any_capability(&[
+            EditionCapability::Backlinks,
+            EditionCapability::WikiLinks,
+            EditionCapability::Tags,
+            EditionCapability::WorkspaceIntelligence,
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn full_builds_authorize_gated_capabilities() {
+        if Edition::current() != Edition::Full {
+            return;
+        }
+        assert_eq!(
+            capabilities_for_edition(Edition::current()).len(),
+            EditionCapability::SHIPPED.len()
+        );
+        for capability in EditionCapability::SHIPPED {
+            assert!(
+                require_capability(capability).is_ok(),
+                "{} should be authorized in Full builds",
+                capability.label()
+            );
+        }
+        assert!(authorize_capability(EditionCapability::WorkspaceSearch).is_ok());
+        assert!(require_capability(EditionCapability::Mermaid).is_err());
     }
 
     #[test]
     fn store_identifiers_disable_in_app_updates() {
         assert!(identifier_supports_updates("run.rosie.tuxedomd"));
         assert!(!identifier_supports_updates("run.rosie.tuxedomd.pro"));
+    }
+
+    #[test]
+    fn opaque_window_matches_mas_feature() {
+        assert_eq!(cfg!(feature = "mas"), get_build_info().opaque_window);
+    }
+
+    #[test]
+    fn path_confined_to_root_rejects_paths_outside_workspace() {
+        let root = std::env::temp_dir().join(format!("tuxedo-confine-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("tuxedo-outside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(root.join("nested")).expect("workspace fixture");
+        fs::create_dir_all(&outside).expect("outside fixture");
+        fs::write(root.join("nested/inside.md"), "in").expect("write inside");
+        fs::write(outside.join("escape.md"), "out").expect("write outside");
+
+        let canonical_root = fs::canonicalize(&root).expect("canonicalize root");
+        assert!(path_confined_to_root(
+            &canonical_root,
+            &root.join("nested/inside.md")
+        ));
+        assert!(!path_confined_to_root(
+            &canonical_root,
+            &outside.join("escape.md")
+        ));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn consent_escapes_adopted_detects_junction_escape() {
+        let adopted = std::env::temp_dir().join(format!("tuxedo-adopted-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("tuxedo-escape-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&adopted);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&adopted).expect("adopted fixture");
+        fs::create_dir_all(&outside).expect("outside fixture");
+        let outside_file = outside.join("secret.md");
+        fs::write(&outside_file, "secret").expect("write outside file");
+
+        let canonical_adopted = fs::canonicalize(&adopted).expect("canonicalize adopted");
+        let canonical_outside = fs::canonicalize(&outside_file).expect("canonicalize outside");
+
+        // No adopted workspace → never an escape.
+        assert!(!consent_escapes_adopted(
+            None,
+            &outside_file,
+            &canonical_outside
+        ));
+        // Canonical target already under adopted → not an escape.
+        let inside = adopted.join("note.md");
+        fs::write(&inside, "ok").expect("write inside");
+        let canonical_inside = fs::canonicalize(&inside).expect("canonicalize inside");
+        assert!(!consent_escapes_adopted(
+            Some(&canonical_adopted),
+            &inside,
+            &canonical_inside
+        ));
+
+        #[cfg(unix)]
+        {
+            let link = adopted.join("linked.md");
+            std::os::unix::fs::symlink(&outside_file, &link).expect("create escape symlink");
+            let canonical_via_link = fs::canonicalize(&link).expect("canonicalize symlink");
+            assert!(!canonical_via_link.starts_with(&canonical_adopted));
+            assert!(consent_escapes_adopted(
+                Some(&canonical_adopted),
+                &link,
+                &canonical_via_link
+            ));
+            let _ = fs::remove_file(&link);
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Simulate the escape shape without requiring junction creation privileges:
+            // path sits under adopted, canonical target does not.
+            let faux_path = adopted.join("linked.md");
+            assert!(consent_escapes_adopted(
+                Some(&canonical_adopted),
+                &faux_path,
+                &canonical_outside
+            ));
+        }
+
+        let _ = fs::remove_dir_all(&adopted);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn confined_walk_skips_paths_outside_root() {
+        let root = std::env::temp_dir().join(format!("tuxedo-walk-root-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("tuxedo-walk-out-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
+        fs::create_dir_all(&root).expect("workspace fixture");
+        fs::create_dir_all(&outside).expect("outside fixture");
+        fs::write(root.join("keep.md"), "keep").expect("write keep");
+        fs::write(outside.join("leak.md"), "leak").expect("write leak");
+        std::os::unix::fs::symlink(outside.join("leak.md"), root.join("leak.md"))
+            .expect("symlink escape into walk root");
+
+        let canonical_root = fs::canonicalize(&root).expect("canonicalize root");
+        let walked = walk_markdown_files(&canonical_root).expect("walk workspace");
+        assert_eq!(walked.len(), 1);
+        assert!(walked[0].ends_with("keep.md"));
+        assert!(path_confined_to_root(&canonical_root, &walked[0]));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -1532,8 +1971,9 @@ mod tests {
         std::os::unix::fs::symlink(root.join("missing-target.md"), &dangling)
             .expect("create dangling symlink");
 
+        let canonical_root = fs::canonicalize(&root).expect("canonicalize workspace root");
         assert!(is_markdown_file_entry(&dangling).expect("symlink metadata"));
-        rename_workspace_document(root.clone(), dangling.clone(), "renamed.md".into())
+        rename_workspace_document_inner(&canonical_root, dangling.clone(), "renamed.md".into())
             .expect("rename dangling markdown symlink");
         let renamed = root.join("renamed.md");
         assert!(renamed
@@ -1541,7 +1981,8 @@ mod tests {
             .expect("renamed link")
             .file_type()
             .is_symlink());
-        delete_workspace_document(root.clone(), renamed).expect("delete dangling markdown symlink");
+        delete_workspace_document_inner(&canonical_root, renamed)
+            .expect("delete dangling markdown symlink");
         assert!(!root.join("renamed.md").exists());
 
         let _ = fs::remove_dir_all(&root);

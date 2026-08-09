@@ -110,10 +110,7 @@ export function generateUpdaterManifests({
   for (const filePath of discovered) {
     const name = path.basename(filePath);
     const current = byName.get(name);
-    if (
-      !current ||
-      updaterPackageRank(name) >= updaterPackageRank(path.basename(current))
-    ) {
+    if (!current || updaterPackageRank(name) >= updaterPackageRank(path.basename(current))) {
       byName.set(name, filePath);
     }
   }
@@ -186,8 +183,7 @@ export function generateUpdaterManifests({
           priority > 0 &&
           (!manifest.platforms[fallbackKey] ||
             priority > manifest.fallbackPriority ||
-            (priority === manifest.fallbackPriority &&
-              packageRank > (ranks[fallbackKey] ?? -1)))
+            (priority === manifest.fallbackPriority && packageRank > (ranks[fallbackKey] ?? -1)))
         ) {
           manifest.platforms[fallbackKey] = { url, signature };
           manifest.fallbackPriority = priority;
@@ -243,9 +239,7 @@ export function generateUpdaterManifests({
     if (manifest.notes) output.notes = manifest.notes;
     const dest = path.join(outputDir, manifestName);
     fs.writeFileSync(dest, `${JSON.stringify(output, null, 2)}\n`);
-    log.log?.(
-      `  + ${manifestName} (${Object.keys(output.platforms).length} platform entries)`
-    );
+    log.log?.(`  + ${manifestName} (${Object.keys(output.platforms).length} platform entries)`);
     generated.push(dest);
   }
 

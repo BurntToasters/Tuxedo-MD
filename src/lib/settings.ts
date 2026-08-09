@@ -33,13 +33,25 @@ export function normalizeSettings(raw: unknown): AppSettings {
     autosaveDelayMs,
     restoreSession: asBoolean(input.restoreSession, defaultSettings.restoreSession),
     keepDraftsSilently: asBoolean(input.keepDraftsSilently, defaultSettings.keepDraftsSilently),
-    theme: asEnum<Theme>(input.theme, ['system', 'dark', 'light', 'contrast'], defaultSettings.theme),
-    glassEffects: asEnum(input.glassEffects, ['system', 'on', 'off'] as const, defaultSettings.glassEffects),
+    theme: asEnum<Theme>(
+      input.theme,
+      ['system', 'dark', 'light', 'contrast'],
+      defaultSettings.theme
+    ),
+    glassEffects: asEnum(
+      input.glassEffects,
+      ['system', 'on', 'off'] as const,
+      defaultSettings.glassEffects
+    ),
     fontSize,
     lineWrap: asBoolean(input.lineWrap, defaultSettings.lineWrap),
     showLineNumbers: asBoolean(input.showLineNumbers, defaultSettings.showLineNumbers),
     tabSize,
-    previewFont: asEnum(input.previewFont, ['sans', 'serif', 'mono'] as const, defaultSettings.previewFont),
+    previewFont: asEnum(
+      input.previewFont,
+      ['sans', 'serif', 'mono'] as const,
+      defaultSettings.previewFont
+    ),
     spellcheck: asBoolean(input.spellcheck, defaultSettings.spellcheck),
     focusMode: asBoolean(input.focusMode, defaultSettings.focusMode),
     autoCheckUpdates: asBoolean(input.autoCheckUpdates, defaultSettings.autoCheckUpdates),

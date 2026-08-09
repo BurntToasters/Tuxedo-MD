@@ -3,10 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { allowDefaultFeedFallback, resolveUpdateCheckTarget } from '../lib/updater';
-import {
-  resolveUpdaterTargets,
-  updaterPackageRank,
-} from '../../scripts/updater-targets.js';
+import { resolveUpdaterTargets, updaterPackageRank } from '../../scripts/updater-targets.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -75,7 +72,7 @@ describe('resolveUpdaterTargets', () => {
 
   it('keeps gpg-sign on the shared updater target mapper', () => {
     const gpgSign = fs.readFileSync(path.join(root, 'scripts/gpg-sign.js'), 'utf8');
-    expect(gpgSign).toContain('from "./updater-targets.js"');
+    expect(gpgSign).toContain("from './updater-targets.js'");
     expect(gpgSign).not.toMatch(/function resolveUpdaterTargets\(/);
     expect(resolveUpdaterTargets('Tuxedo MD_0.1.0_x64-setup.nsis.zip')).toEqual([
       { os: 'windows', arch: 'x86_64', installer: 'nsis' },

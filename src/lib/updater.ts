@@ -1,10 +1,7 @@
 import { getVersion } from '@tauri-apps/api/app';
 import { invoke } from '@tauri-apps/api/core';
 import { ask, message } from '@tauri-apps/plugin-dialog';
-import {
-  isPermissionGranted,
-  sendNotification,
-} from '@tauri-apps/plugin-notification';
+import { isPermissionGranted, sendNotification } from '@tauri-apps/plugin-notification';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { check, type Update } from '@tauri-apps/plugin-updater';
 import { isDesktop } from './tauri';
@@ -34,7 +31,11 @@ const UPDATE_CHECK_TIMEOUT_MS = 30_000;
 const UPDATE_DOWNLOAD_TIMEOUT_MS = 120_000;
 const UPDATE_INSTALL_TIMEOUT_MS = 180_000;
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  timeoutMessage: string
+): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
     promise.then(

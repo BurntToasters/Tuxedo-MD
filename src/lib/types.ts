@@ -17,7 +17,17 @@ export interface BuildInfo {
   edition: Edition;
   version: string;
   capabilities: EditionCapability[];
+  opaqueWindow?: boolean;
 }
+
+/** Capabilities that are implemented and natively enforced today. */
+export const shippedCapabilities: EditionCapability[] = [
+  'workspaceSearch',
+  'backlinks',
+  'wikiLinks',
+  'tags',
+  'workspaceIntelligence',
+];
 
 export type EditorMode = 'source' | 'split' | 'preview';
 

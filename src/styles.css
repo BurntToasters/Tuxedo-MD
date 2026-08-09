@@ -63,8 +63,11 @@ button {
 
 body {
   background:
-    radial-gradient(circle at 17% 5%, rgba(93, 89, 194, 0.26), transparent 38%),
-    radial-gradient(circle at 90% 95%, rgba(32, 144, 158, 0.17), transparent 32%), #080a0f;
+    radial-gradient(circle at 17% 5%, rgba(32, 144, 158, 0.18), transparent 38%),
+    radial-gradient(circle at 90% 95%, rgba(56, 139, 253, 0.12), transparent 32%), #080a0f;
+}
+:root[data-window-fx='native'] body {
+  background: transparent;
 }
 
 .app-shell {
@@ -74,6 +77,17 @@ body {
   backdrop-filter: blur(34px) saturate(130%);
   display: flex;
   flex-direction: column;
+}
+/* Before main.ts sets data-window-fx, keep shell opaque (no frost FOUC). */
+:root:not([data-window-fx]) .app-shell {
+  background: #10131b;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+:root[data-window-fx='native'] .app-shell {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .titlebar {
@@ -113,6 +127,14 @@ body {
   flex-shrink: 0;
   margin: 0 4px;
   background: var(--border-muted);
+}
+.titlebar-edition-chip {
+  flex-shrink: 0;
+  align-self: center;
+  padding: 0 5px;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  line-height: 16px;
 }
 .titlebar-drag-fill {
   flex: 1;
@@ -2225,13 +2247,20 @@ body {
   padding: 0 6px 0 calc(4px + var(--tree-depth, 0) * 12px);
   border-radius: 6px;
   color: var(--text);
-  cursor: pointer;
   font-size: 12px;
+}
+.tree-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+  cursor: pointer;
 }
 .tree-row:hover {
   background: var(--accent-muted);
 }
-.tree-row:focus-visible {
+.tree-item:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
 }
@@ -2261,7 +2290,7 @@ body {
   flex-shrink: 0;
 }
 .tree-row:hover .tree-actions,
-.tree-row:focus-visible .tree-actions,
+.tree-item:focus-visible ~ .tree-actions,
 .tree-row:focus-within .tree-actions {
   display: flex;
 }
@@ -2434,23 +2463,25 @@ body {
   opacity: 0.55;
 }
 
-/* Native material shell: glass belongs to chrome; documents stay fully opaque. */
+/* Native material shell: OS blur shows through chrome; documents stay fully opaque. */
 :root {
   color-scheme: dark;
-  --chrome-tint: rgba(13, 17, 23, 0.34);
-  --chrome-tint-strong: rgba(13, 17, 23, 0.58);
-  --chrome-control: rgba(1, 4, 9, 0.42);
-  --dialog-tint: rgba(22, 27, 34, 0.88);
+  --chrome-tint: color-mix(in srgb, var(--canvas) 42%, transparent);
+  --chrome-tint-strong: color-mix(in srgb, var(--surface) 58%, transparent);
+  --chrome-control: color-mix(in srgb, var(--canvas-inset) 48%, transparent);
+  --chrome-border: color-mix(in srgb, var(--text) 11%, transparent);
+  --dialog-tint: color-mix(in srgb, var(--surface) 72%, transparent);
   --document-surface: #0d1117;
   --document-toolbar: #161b22;
   --document-shadow: 0 12px 34px rgba(1, 4, 9, 0.26);
 }
 :root[data-theme='light'] {
   color-scheme: light;
-  --chrome-tint: rgba(246, 248, 250, 0.46);
-  --chrome-tint-strong: rgba(246, 248, 250, 0.7);
+  --chrome-tint: color-mix(in srgb, #f6f8fa 46%, transparent);
+  --chrome-tint-strong: color-mix(in srgb, #ffffff 64%, transparent);
   --chrome-control: rgba(255, 255, 255, 0.58);
-  --dialog-tint: rgba(255, 255, 255, 0.9);
+  --chrome-border: rgba(0, 0, 0, 0.08);
+  --dialog-tint: color-mix(in srgb, #ffffff 78%, transparent);
   --document-surface: #ffffff;
   --document-toolbar: #f6f8fa;
   --document-shadow: 0 12px 34px rgba(31, 35, 40, 0.13);
@@ -2460,6 +2491,7 @@ body {
   --chrome-tint: #000000;
   --chrome-tint-strong: #000000;
   --chrome-control: #000000;
+  --chrome-border: #ffffff;
   --dialog-tint: #000000;
   --document-surface: #000000;
   --document-toolbar: #000000;
@@ -2499,20 +2531,24 @@ body {
   -webkit-backdrop-filter: none;
 }
 
+/* Native FX: clear shell so Mica / HudWindow show through; no stacked CSS blur on chrome. */
 :root[data-window-fx='native'],
 :root[data-window-fx='native'] body,
 :root[data-window-fx='native'] #app,
 :root[data-window-fx='native'] .app-shell,
 :root[data-window-fx='native'] .workspace,
 :root[data-window-fx='native'] .main-area {
-  background: transparent;
+  background: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 :root[data-window-fx='native'] .titlebar,
 :root[data-window-fx='native'] .sidebar,
 :root[data-window-fx='native'] .statusbar {
   background: var(--chrome-tint);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
+  border-color: var(--chrome-border);
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 :root[data-window-fx='native'] .sidebar {
   background: var(--chrome-tint-strong);
@@ -2523,13 +2559,76 @@ body {
 :root[data-window-fx='native'] .search-box {
   background: var(--chrome-control);
 }
-:root[data-window-fx='native'] .settings-modal {
+:root[data-window-fx='native'] .editor-grid,
+:root[data-window-fx='native'] .source-pane,
+:root[data-window-fx='native'] .preview-pane,
+:root[data-window-fx='native'] .editor-host .cm-editor,
+:root[data-window-fx='native'] .editor-host .cm-gutters,
+:root[data-window-fx='native'] .formatting-toolbar {
+  background: var(--document-surface);
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+/* Floating dialogs keep light frosted CSS blur over OS vibrancy. */
+:root[data-window-fx='native'] .settings-modal,
+:root[data-window-fx='native'] .modal-panel,
+:root[data-window-fx='native'] .command-palette {
   background: var(--dialog-tint);
-  backdrop-filter: blur(28px) saturate(135%);
-  -webkit-backdrop-filter: blur(28px) saturate(135%);
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
 }
 :root[data-window-fx='native'] .app-shell.focus-mode .titlebar:hover,
 :root[data-window-fx='native'] .app-shell.focus-mode .titlebar:focus-within {
+  background: var(--chrome-tint-strong);
+}
+
+/* CSS frost fallback: opaque shell/canvas, frosted chrome, solid documents. */
+:root[data-window-fx='css'],
+:root[data-window-fx='css'] body,
+:root[data-window-fx='css'] #app,
+:root[data-window-fx='css'] .app-shell,
+:root[data-window-fx='css'] .workspace,
+:root[data-window-fx='css'] .main-area {
+  background: var(--canvas);
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+:root[data-window-fx='css'] .titlebar,
+:root[data-window-fx='css'] .sidebar,
+:root[data-window-fx='css'] .statusbar {
+  background: var(--chrome-tint);
+  border-color: var(--chrome-border);
+  backdrop-filter: blur(24px) saturate(140%);
+  -webkit-backdrop-filter: blur(24px) saturate(140%);
+}
+:root[data-window-fx='css'] .sidebar {
+  background: var(--chrome-tint-strong);
+}
+:root[data-window-fx='css'] .titlebar-tab.active,
+:root[data-window-fx='css'] .titlebar-mode-toggle,
+:root[data-window-fx='css'] .drawer-tabs,
+:root[data-window-fx='css'] .search-box {
+  background: var(--chrome-control);
+}
+:root[data-window-fx='css'] .editor-grid,
+:root[data-window-fx='css'] .source-pane,
+:root[data-window-fx='css'] .preview-pane,
+:root[data-window-fx='css'] .editor-host .cm-editor,
+:root[data-window-fx='css'] .editor-host .cm-gutters,
+:root[data-window-fx='css'] .formatting-toolbar {
+  background: var(--document-surface);
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+:root[data-window-fx='css'] .settings-modal,
+:root[data-window-fx='css'] .modal-panel,
+:root[data-window-fx='css'] .command-palette {
+  background: var(--dialog-tint);
+  backdrop-filter: blur(18px) saturate(145%);
+  -webkit-backdrop-filter: blur(18px) saturate(145%);
+}
+:root[data-window-fx='css'] .app-shell.focus-mode .titlebar:hover,
+:root[data-window-fx='css'] .app-shell.focus-mode .titlebar:focus-within {
   background: var(--chrome-tint-strong);
 }
 
@@ -2542,15 +2641,24 @@ body {
 :root:is([data-window-fx='opaque'], [data-glass='off']) .workspace,
 :root:is([data-window-fx='opaque'], [data-glass='off']) .main-area {
   background: var(--canvas);
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 :root:is([data-window-fx='opaque'], [data-glass='off']) .titlebar,
 :root:is([data-window-fx='opaque'], [data-glass='off']) .sidebar {
   background: var(--surface);
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 :root:is([data-window-fx='opaque'], [data-glass='off']) .statusbar {
   background: var(--canvas);
+}
+:root:is([data-window-fx='opaque'], [data-glass='off']) .settings-modal,
+:root:is([data-window-fx='opaque'], [data-glass='off']) .modal-panel,
+:root:is([data-window-fx='opaque'], [data-glass='off']) .command-palette {
+  background: var(--surface-raised);
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
 }
 
 :root[data-theme='contrast'] body,
@@ -2663,14 +2771,14 @@ body {
   --scroll-thumb: rgba(87, 96, 106, 0.32);
 }
 :root[data-window-fx='native'][data-window-active='false'] {
-  --chrome-tint: rgba(13, 17, 23, 0.5);
-  --chrome-tint-strong: rgba(13, 17, 23, 0.68);
-  --chrome-control: rgba(1, 4, 9, 0.52);
+  --chrome-tint: color-mix(in srgb, var(--canvas) 58%, transparent);
+  --chrome-tint-strong: color-mix(in srgb, var(--surface) 72%, transparent);
+  --chrome-control: color-mix(in srgb, var(--canvas-inset) 56%, transparent);
   --document-shadow: 0 8px 24px rgba(1, 4, 9, 0.18);
 }
 :root[data-theme='light'][data-window-fx='native'][data-window-active='false'] {
-  --chrome-tint: rgba(246, 248, 250, 0.62);
-  --chrome-tint-strong: rgba(246, 248, 250, 0.78);
+  --chrome-tint: color-mix(in srgb, #f6f8fa 62%, transparent);
+  --chrome-tint-strong: color-mix(in srgb, #ffffff 78%, transparent);
   --chrome-control: rgba(255, 255, 255, 0.7);
   --document-shadow: 0 8px 24px rgba(31, 35, 40, 0.09);
 }

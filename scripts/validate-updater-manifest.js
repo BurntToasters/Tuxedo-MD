@@ -6,17 +6,17 @@
  * Defaults to fixtures under testdata/updater/.
  */
 
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(__dirname, "..");
-const defaultFixturesDir = path.join(root, "testdata", "updater");
+const root = path.join(__dirname, '..');
+const defaultFixturesDir = path.join(root, 'testdata', 'updater');
 const defaultFixtures = fs.existsSync(defaultFixturesDir)
   ? fs
       .readdirSync(defaultFixturesDir)
-      .filter((name) => name.startsWith("latest-") && name.endsWith(".json"))
+      .filter((name) => name.startsWith('latest-') && name.endsWith('.json'))
       .sort()
       .map((name) => path.join(defaultFixturesDir, name))
   : [];
@@ -27,25 +27,25 @@ function fail(message) {
 }
 
 function isNonEmptyString(value) {
-  return typeof value === "string" && value.trim().length > 0;
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function decodeStrictBase64(value) {
   if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) {
     return null;
   }
-  const decoded = Buffer.from(value, "base64");
-  return decoded.toString("base64") === value ? decoded : null;
+  const decoded = Buffer.from(value, 'base64');
+  return decoded.toString('base64') === value ? decoded : null;
 }
 
 function hasMinisignEnvelope(value) {
   const outer = decodeStrictBase64(value);
   if (!outer) return false;
-  const lines = outer.toString("utf8").trim().split(/\r?\n/);
+  const lines = outer.toString('utf8').trim().split(/\r?\n/);
   if (
     lines.length !== 4 ||
-    !lines[0].startsWith("untrusted comment:") ||
-    !lines[2].startsWith("trusted comment:")
+    !lines[0].startsWith('untrusted comment:') ||
+    !lines[2].startsWith('trusted comment:')
   ) {
     return false;
   }
@@ -57,15 +57,11 @@ function hasMinisignEnvelope(value) {
     signaturePacket.length >= 2 &&
     signaturePacket[0] === 0x45 &&
     (signaturePacket[1] === 0x64 || signaturePacket[1] === 0x44);
-  return (
-    Boolean(algorithm) &&
-    signaturePacket.length === 74 &&
-    globalSignature?.length === 64
-  );
+  return Boolean(algorithm) && signaturePacket.length === 74 && globalSignature?.length === 64;
 }
 
 function validateManifest(filePath) {
-  const raw = fs.readFileSync(filePath, "utf8");
+  const raw = fs.readFileSync(filePath, 'utf8');
   let data;
   try {
     data = JSON.parse(raw);
@@ -74,7 +70,7 @@ function validateManifest(filePath) {
     return;
   }
 
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
     fail(`${filePath}: root must be an object`);
     return;
   }
@@ -91,7 +87,7 @@ function validateManifest(filePath) {
   ) {
     fail(`${filePath}: pub_date must be a normalized ISO-8601 UTC timestamp`);
   }
-  if (!data.platforms || typeof data.platforms !== "object") {
+  if (!data.platforms || typeof data.platforms !== 'object') {
     fail(`${filePath}: missing object "platforms"`);
     return;
   }
@@ -100,11 +96,9 @@ function validateManifest(filePath) {
   if (entries.length === 0) {
     fail(`${filePath}: platforms must not be empty`);
   }
-  const expectedTarget = path
-    .basename(filePath, ".json")
-    .replace(/^latest-/, "");
-  const betaFallbackTarget = expectedTarget.includes("-beta-")
-    ? expectedTarget.replace(/-(?:aarch64|x86_64)$/i, "")
+  const expectedTarget = path.basename(filePath, '.json').replace(/^latest-/, '');
+  const betaFallbackTarget = expectedTarget.includes('-beta-')
+    ? expectedTarget.replace(/-(?:aarch64|x86_64)$/i, '')
     : null;
   for (const [key, platform] of entries) {
     if (
@@ -112,11 +106,9 @@ function validateManifest(filePath) {
       !key.startsWith(`${expectedTarget}-`) &&
       key !== betaFallbackTarget
     ) {
-      fail(
-        `${filePath}: platform key ${key} does not match manifest target ${expectedTarget}`,
-      );
+      fail(`${filePath}: platform key ${key} does not match manifest target ${expectedTarget}`);
     }
-    if (!platform || typeof platform !== "object") {
+    if (!platform || typeof platform !== 'object') {
       fail(`${filePath}: platforms.${key} must be an object`);
       continue;
     }
@@ -126,32 +118,26 @@ function validateManifest(filePath) {
     } catch {}
     if (
       !isNonEmptyString(platform.url) ||
-      parsedUrl?.protocol !== "https:" ||
-      parsedUrl.hostname !== "github.com" ||
-      !parsedUrl.pathname.includes("/releases/") ||
+      parsedUrl?.protocol !== 'https:' ||
+      parsedUrl.hostname !== 'github.com' ||
+      !parsedUrl.pathname.includes('/releases/') ||
       parsedUrl.username ||
       parsedUrl.password ||
       parsedUrl.hash
     ) {
       fail(`${filePath}: platforms.${key}.url must be an https URL`);
     }
-    if (
-      !isNonEmptyString(platform.signature) ||
-      !hasMinisignEnvelope(platform.signature)
-    ) {
-      fail(
-        `${filePath}: platforms.${key}.signature must be a base64-encoded minisign envelope`,
-      );
+    if (!isNonEmptyString(platform.signature) || !hasMinisignEnvelope(platform.signature)) {
+      fail(`${filePath}: platforms.${key}.signature must be a base64-encoded minisign envelope`);
     }
   }
 }
 
 const targets = process.argv.slice(2);
-const files =
-  targets.length > 0 ? targets : defaultFixtures.filter(fs.existsSync);
+const files = targets.length > 0 ? targets : defaultFixtures.filter(fs.existsSync);
 
 if (files.length === 0) {
-  fail("no updater fixtures found; expected testdata/updater/latest-*.json");
+  fail('no updater fixtures found; expected testdata/updater/latest-*.json');
   process.exit(1);
 }
 
@@ -164,7 +150,5 @@ for (const file of files) {
 }
 
 if (!process.exitCode) {
-  console.log(
-    `updater-manifest: ok (${files.length} file${files.length === 1 ? "" : "s"})`,
-  );
+  console.log(`updater-manifest: ok (${files.length} file${files.length === 1 ? '' : 's'})`);
 }

@@ -10,7 +10,15 @@ const CLEAN_TARGETS = {
   clean: ['dist', 'coverage', 'coverage-headless'],
   'clean-release': ['release'],
   'clean-release-artifacts': ['release', 'dist', 'msstore', 'mas'],
-  'clean-all': ['dist', 'coverage', 'coverage-headless', 'release', 'msstore', 'mas', 'src-tauri/target'],
+  'clean-all': [
+    'dist',
+    'coverage',
+    'coverage-headless',
+    'release',
+    'msstore',
+    'mas',
+    'src-tauri/target',
+  ],
 };
 
 function listTauriBundleDirs(cwd) {

@@ -9,8 +9,8 @@ const schema = {
   ...defaultSchema,
   protocols: {
     ...defaultSchema.protocols,
-    // Keep preview links aligned with the opener allowlist; drop irc/xmpp/etc.
-    href: ['http', 'https', 'mailto'],
+    // Keep preview links aligned with the opener allowlist; drop http/irc/xmpp/etc.
+    href: ['https', 'mailto'],
     // Block remote image beacons. Empty allow-lists are treated as unrestricted
     // by rehype-sanitize, so keep only data: (relative src still works).
     src: ['data'],

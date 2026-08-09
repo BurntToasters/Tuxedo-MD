@@ -15,7 +15,9 @@ export function toMsixIdentityVersion(version) {
   const patch = Number(match[3]);
   const preKind = (match[4] || '').toLowerCase();
   const preN = Number(match[5] || 0);
-  if ([major, minor, patch, preN].some((part) => !Number.isInteger(part) || part < 0 || part > 65535)) {
+  if (
+    [major, minor, patch, preN].some((part) => !Number.isInteger(part) || part < 0 || part > 65535)
+  ) {
     throw new Error(`MSIX version components out of range for ${version}`);
   }
   let revision = 3000; // stable sorts above prereleases of the same X.Y.Z

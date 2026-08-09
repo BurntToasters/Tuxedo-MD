@@ -1,6 +1,7 @@
 <script lang="ts">
   import {
     BookOpenText,
+    Command,
     FilePlus2,
     FolderOpen,
     History,
@@ -21,18 +22,30 @@
   } from '@lucide/svelte';
   import { onMount } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import { formatShortcut, modKeyLabel } from './lib/shortcuts';
+  import { formatShortcut } from './lib/shortcuts';
   import { normalizeSettings } from './lib/settings';
   import MarkdownEditor from './lib/editor/MarkdownEditor.svelte';
   import {
     capabilityMessage,
+    editionLabel,
     editionVersion,
     editionWarning,
     hasCapability,
     isFullEdition,
+    opaqueWindow,
     requireCapability,
   } from './lib/edition';
+  import { setDraftIndexed as writeDraftIndex } from './lib/draft-index';
   import { renderMarkdown } from './lib/preview';
+  import {
+    hydrateSessionTabs,
+    normalizeDocumentTab,
+    normalizeDraftIndex,
+    normalizeSessionState,
+    pathsReferToSameFile,
+    slimSessionTabs,
+  } from './lib/session';
+  import { isTabDirty, neutralizeDiscardedTab, shouldPersistDraft } from './lib/tab-lifecycle';
   import {
     chooseDocument,
     chooseSavePath,
@@ -41,6 +54,7 @@
     readDocument,
     writeDocument,
     probeDocument,
+    probeDocumentMeta,
     loadState,
     saveState,
     deleteState,
@@ -48,6 +62,8 @@
     getLicenses,
     setDocumentEdited,
     scanWorkspace,
+    adoptWorkspaceFolder,
+    registerConsentedPath,
     searchWorkspace,
     collectWorkspaceReferences,
     createWorkspaceDocument,
@@ -71,10 +87,15 @@
     parentDirectoryOf,
     type FlatWorkspaceNode,
   } from './lib/workspace-tree';
-  import { applyNativeWindowEffects, resizeWindowForDrawer } from './lib/window';
+  import { resizeWindowForDrawer } from './lib/window';
+  import { syncAppearanceEffects } from './lib/appearance';
   import { detectPlatform, usesCustomTitleBar, type AppPlatform } from './lib/platform';
   import { formatWindowTitle } from './lib/window-title';
-  import { requestAppClose, shouldPreventClose } from './lib/window-lifecycle';
+  import {
+    askDirtyTabClose,
+    requestAppClose,
+    shouldInterceptNativeClose,
+  } from './lib/window-lifecycle';
   import type { MenuCommandId } from './lib/menu-commands';
   import WindowMenubar from './lib/chrome/WindowMenubar.svelte';
   import WindowControls from './lib/chrome/WindowControls.svelte';
@@ -120,9 +141,11 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   // Pro surfaces are driven by the native capability set, never by the build flag alone.
   const canSearchWorkspace = hasCapability('workspaceSearch');
   const canUseBacklinks = hasCapability('backlinks');
+  const canUseWikiLinks = hasCapability('wikiLinks');
   const canUseTags = hasCapability('tags');
   const canInspectWorkspace = hasCapability('workspaceIntelligence');
-  const showReferencePanel = canUseBacklinks || canUseTags || canInspectWorkspace;
+  const showReferencePanel =
+    canUseBacklinks || canUseTags || canInspectWorkspace || canUseWikiLinks;
   let tabs = $state<DocumentTab[]>([initialTab]);
   let activeId = $state(initialTab.id);
   let mode = $state<EditorMode>('source');
@@ -152,6 +175,9 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let referencesAttempted = $state(false);
   let namePrompt = $state<{ title: string; label: string; value: string } | null>(null);
   let namePromptInput = $state<HTMLInputElement | null>(null);
+  let namePromptDialog = $state<HTMLDialogElement | null>(null);
+  let settingsDialog = $state<HTMLDialogElement | null>(null);
+  let conflictDialog = $state<HTMLDialogElement | null>(null);
   let settingsInitialFocus = $state<HTMLButtonElement | null>(null);
   let conflictInitialFocus = $state<HTMLButtonElement | null>(null);
   let settleNamePrompt: ((value: string | null) => void) | null = null;
@@ -209,6 +235,18 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   });
 
   $effect(() => {
+    if (settingsOpen && settingsDialog && !settingsDialog.open) settingsDialog.showModal();
+  });
+
+  $effect(() => {
+    if (namePrompt && namePromptDialog && !namePromptDialog.open) namePromptDialog.showModal();
+  });
+
+  $effect(() => {
+    if (conflictOpen && conflictDialog && !conflictDialog.open) conflictDialog.showModal();
+  });
+
+  $effect(() => {
     if (settingsOpen) settingsInitialFocus?.focus();
   });
 
@@ -238,8 +276,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let autosaveTimer: ReturnType<typeof setTimeout> | undefined;
   let previewRenderRequest = 0;
   let externalCheckInFlight = false;
-  const saveInFlightIds = new Set<string>();
-  const cancelledSaveTabIds = new Set<string>();
+  const saveInFlightIds = new SvelteSet<string>();
+  const cancelledSaveTabIds = new SvelteSet<string>();
   let draftIndexChain: Promise<void> = Promise.resolve();
   let sessionRestoreComplete = false;
   const deferredOpenPaths: string[] = [];
@@ -295,9 +333,15 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   $effect(() => {
     const content = activeTab?.content ?? '';
     const request = ++previewRenderRequest;
-    renderMarkdown(content).then((html) => {
-      if (request === previewRenderRequest) preview = html;
-    });
+    renderMarkdown(content)
+      .then((html) => {
+        if (request === previewRenderRequest) preview = html;
+      })
+      .catch((error) => {
+        if (request !== previewRenderRequest) return;
+        preview = '';
+        status = `Preview failed: ${readableError(error)}`;
+      });
   });
 
   let windowEffectRequest = 0;
@@ -328,9 +372,10 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       // Serialize native mutations so a slow, stale request cannot re-enable an old effect.
       windowEffectsUpdate = windowEffectsUpdate.then(async () => {
         if (request !== windowEffectRequest) return;
-        const state = await applyNativeWindowEffects(
+        const state = await syncAppearanceEffects(
           effectiveGlassEffects,
-          resolvedTheme !== 'light'
+          resolvedTheme !== 'light',
+          { opaqueWindow }
         );
         if (request === windowEffectRequest) root.dataset.windowFx = state;
       });
@@ -361,7 +406,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     };
   });
 
-  let previousRestoreSession = settings.restoreSession;
+  let previousRestoreSession: boolean | undefined;
   let restoreSessionWatchReady = false;
   $effect(() => {
     const settingsSnapshot = settings;
@@ -469,6 +514,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   function closeSettings() {
+    if (settingsDialog?.open) settingsDialog.close();
+    if (!settingsOpen) return;
     settingsOpen = false;
     const target = settingsReturnFocus;
     settingsReturnFocus = null;
@@ -493,42 +540,21 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   async function setDraftIndexed(id: string, keep: boolean) {
-    draftIndexChain = draftIndexChain.then(async () => {
-      const index = (await loadState<string[]>('draft-index')) ?? [];
-      const has = index.includes(id);
-      if (keep && !has) await saveState('draft-index', [...index, id]);
-      if (!keep && has) await saveState('draft-index', index.filter((item) => item !== id));
-    });
+    draftIndexChain = draftIndexChain.then(() =>
+      writeDraftIndex(id, keep, { loadState, saveState })
+    );
     await draftIndexChain;
   }
 
-  function pathsReferToSameFile(left: string | null | undefined, right: string | null | undefined) {
-    if (!left || !right) return false;
-    const normalize = (value: string) => value.replace(/\\/g, '/');
-    const a = normalize(left);
-    const b = normalize(right);
-    if (a === b) return true;
-    return a.toLowerCase() === b.toLowerCase();
-  }
-
   async function recoverOrphanDrafts(existing: DocumentTab[]): Promise<DocumentTab[]> {
-    const index = (await loadState<string[]>('draft-index')) ?? [];
+    const index = normalizeDraftIndex(await loadState<string[]>('draft-index'));
     const recovered: DocumentTab[] = [];
     for (const id of index) {
       if (existing.some((tab) => tab.id === id)) continue;
-      const draft = await loadState<DocumentTab>(`draft-${id}`);
-      if (!draft || typeof draft.content !== 'string') continue;
-      recovered.push({
-        id: draft.id || id,
-        name: draft.name || 'Untitled.md',
-        path: draft.path ?? null,
-        content: draft.content,
-        savedContent: draft.savedContent ?? draft.content,
-        fingerprint: draft.fingerprint ?? null,
-        conflict: false,
-        recovered: true,
-        selection: draft.selection ?? { anchor: 0, head: 0 },
-      });
+      const draft = normalizeDocumentTab(await loadState(`draft-${id}`));
+      if (!draft) continue;
+      if (draft.content === draft.savedContent && !draft.conflict) continue;
+      recovered.push({ ...draft, recovered: true });
     }
     return recovered;
   }
@@ -542,6 +568,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   function dismissConflictForTab(id: string) {
     conflictQueue = conflictQueue.filter((item) => item !== id);
     if (conflictTabId !== id) return;
+    conflictDialog?.close();
     conflictOpen = false;
     conflictTabId = null;
     const target = conflictReturnFocus;
@@ -731,10 +758,10 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         void saveActive(true);
         break;
       case 'close-tab':
-        closeTab(activeId);
+        void closeTab(activeId);
         break;
       case 'quit':
-        if (isDesktop()) void requestAppClose(hasUnsavedChanges);
+        if (isDesktop()) void quitApp();
         break;
       case 'find':
         requestFind();
@@ -832,7 +859,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       }
       if (event.key.toLowerCase() === 'w') {
         event.preventDefault();
-        closeTab(activeId);
+        void closeTab(activeId);
         return;
       }
       if (event.key.toLowerCase() === 's') {
@@ -869,9 +896,9 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     if (isDesktop()) {
       void getCurrentWindow()
         .onCloseRequested((event) => {
-          if (shouldPreventClose(hasUnsavedChanges)) {
-            event.preventDefault();
-          }
+          if (!shouldInterceptNativeClose()) return;
+          event.preventDefault();
+          void quitApp();
         })
         .then((unlistenClose) => teardowns.push(unlistenClose));
       void import('@tauri-apps/api/event').then(async ({ listen }) => {
@@ -956,9 +983,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         );
         status = `Reloaded ${document.name}`;
       } else if (existing.fingerprint?.hash !== document.fingerprint.hash) {
-        tabs = tabs.map((tab) =>
-          tab.id === existing.id ? { ...tab, conflict: true } : tab
-        );
+        tabs = tabs.map((tab) => (tab.id === existing.id ? { ...tab, conflict: true } : tab));
         openConflict(existing.id);
         status = `${document.name} changed on disk`;
       }
@@ -1026,7 +1051,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       return;
     }
     try {
-      await adoptWorkspace(root, await scanWorkspace(root));
+      const adopted = await adoptWorkspaceFolder(root);
+      await adoptWorkspace(adopted, await scanWorkspace(adopted));
     } catch (error) {
       status = readableError(error);
     }
@@ -1035,6 +1061,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   async function refreshWorkspace() {
     if (!workspaceRoot || !isDesktop()) return;
     try {
+      // Re-pin adopt in case the process lost state; scan requires a prior adopt.
+      workspaceRoot = await adoptWorkspaceFolder(workspaceRoot);
       workspaceFiles = await scanWorkspace(workspaceRoot);
       // Both derived views describe the old file set once it changes.
       searchResults = [];
@@ -1068,6 +1096,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     const target = namePromptReturnFocus;
     settleNamePrompt = null;
     namePromptReturnFocus = null;
+    namePromptDialog?.close();
     namePrompt = null;
     settle?.(value);
     restoreFocus(target);
@@ -1138,10 +1167,17 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     if (!confirm(`Delete ${node.name}? This cannot be undone.${warning}`)) return;
     try {
       await deleteWorkspaceDocument(workspaceRoot, node.path);
-      // Detach the open tab so its content survives; preserve real dirty state.
+      // Detach the open tab so its content survives as a dirty recovered draft.
       tabs = tabs.map((tab) =>
         pathsReferToSameFile(tab.path, node.path)
-          ? { ...tab, path: null, fingerprint: null, conflict: false }
+          ? {
+              ...tab,
+              path: null,
+              savedContent: '',
+              recovered: true,
+              fingerprint: null,
+              conflict: false,
+            }
           : tab
       );
       recentFiles = recentFiles.filter((path) => !pathsReferToSameFile(path, node.path));
@@ -1241,7 +1277,14 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
   async function openWorkspaceFile(path: string) {
     try {
-      addDocument(await readDocument(path));
+      // Under an adopted workspace, open/save need no extra consent.
+      // OS / recent paths outside the workspace still require an explicit consent grant.
+      try {
+        addDocument(await readDocument(path));
+      } catch {
+        await registerConsentedPath(path);
+        addDocument(await readDocument(path));
+      }
     } catch (error) {
       status = readableError(error);
     }
@@ -1259,14 +1302,14 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     sidebarOpen = true;
   }
 
-  async function saveTab(tabId: string, saveAs = false) {
+  async function saveTab(tabId: string, saveAs = false): Promise<boolean> {
     const tab = tabs.find((candidate) => candidate.id === tabId);
-    if (!tab) return;
+    if (!tab) return false;
     if (!isDesktop()) {
       status = 'Native saving is available in the desktop app';
-      return;
+      return false;
     }
-    if (saveInFlightIds.has(tabId)) return;
+    if (saveInFlightIds.has(tabId)) return false;
     if (cancelledSaveTabIds.has(tabId)) {
       // Sticky cancel from a prior discard — only a later non-cancelled start clears it.
       cancelledSaveTabIds.delete(tabId);
@@ -1277,10 +1320,10 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     const revertContent = tab.savedContent;
     try {
       const path = saveAs || !tab.path ? await chooseSavePath(tab.path) : tab.path;
-      if (!path) return;
+      if (!path) return false;
       if (cancelledSaveTabIds.has(tabId)) {
         cancelledSaveTabIds.delete(tabId);
-        return;
+        return false;
       }
       const owner = tabs.find(
         (candidate) => candidate.id !== tabId && pathsReferToSameFile(candidate.path, path)
@@ -1288,7 +1331,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       if (owner) {
         status = `Already open in another tab: ${owner.name}`;
         activeId = owner.id;
-        return;
+        return false;
       }
       const fingerprint = await writeDocument(path, contentToWrite, priorFingerprint, false);
       if (cancelledSaveTabIds.has(tabId)) {
@@ -1301,7 +1344,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
             console.error('Failed to revert discarded save', error);
           }
         }
-        return;
+        return false;
       }
       const name = path.split(/[\\/]/).at(-1) ?? tab.name;
       tabs = tabs.map((item) =>
@@ -1319,17 +1362,27 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       );
       status = `Saved ${name}`;
       recentFiles = remember(recentFiles, path);
+      if (isDesktop()) {
+        try {
+          await deleteState(`draft-${tabId}`);
+          await setDraftIndexed(tabId, false);
+        } catch (error) {
+          console.error('Failed to clear recovery draft after save', error);
+        }
+      }
       schedulePersistence();
+      return true;
     } catch (error) {
       if (cancelledSaveTabIds.has(tabId)) {
         cancelledSaveTabIds.delete(tabId);
-        return;
+        return false;
       }
       if (readableError(error).includes('changed on disk')) {
         tabs = tabs.map((item) => (item.id === tabId ? { ...item, conflict: true } : item));
         openConflict(tabId);
         status = 'Save paused: file changed outside Tuxedo MD';
       } else status = readableError(error);
+      return false;
     } finally {
       saveInFlightIds.delete(tabId);
     }
@@ -1341,8 +1394,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   async function openExternalUrl(href: string) {
-    if (!/^(https?:|mailto:)/i.test(href)) {
-      throw new Error('Only http(s) and mailto links can be opened externally');
+    if (!/^(https:|mailto:)/i.test(href)) {
+      throw new Error('Only https and mailto links can be opened externally');
     }
     if (isDesktop()) {
       const { openUrl } = await import('@tauri-apps/plugin-opener');
@@ -1362,7 +1415,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     event.preventDefault();
     event.stopPropagation();
     try {
-      if (/^(https?:|mailto:)/i.test(href)) {
+      if (/^(https:|mailto:)/i.test(href)) {
         await openExternalUrl(href);
         return;
       }
@@ -1396,7 +1449,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     activeId = tabs[next].id;
   }
 
-  function closeTab(id: string) {
+  async function closeTab(id: string) {
     const tab = tabs.find((candidate) => candidate.id === id);
     if (!tab) return;
     enableSessionPersist();
@@ -1405,33 +1458,51 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       autosaveTimer = undefined;
     }
 
-    const dirty = tab.content !== tab.savedContent;
-    let keepDraft = dirty && settings.keepDraftsSilently;
-    if (dirty && !settings.keepDraftsSilently) {
-      keepDraft = !confirm(
-        `Discard the unsaved draft for ${tab.name}?\nChoose Cancel to keep it available when Tuxedo MD reopens.`
-      );
+    const dirty = isTabDirty(tab);
+    let keepDraft = false;
+    if (dirty) {
+      if (settings.keepDraftsSilently && !tab.path) {
+        keepDraft = true;
+      } else {
+        const choice = await askDirtyTabClose(tab.name);
+        if (choice === 'cancel') return;
+        if (choice === 'save') {
+          const saved = await saveTab(id, false);
+          if (!saved) return;
+          keepDraft = false;
+        } else {
+          keepDraft = false;
+        }
+      }
     }
     if (!keepDraft) cancelledSaveTabIds.add(id);
     if (isDesktop()) {
-      void (async () => {
-        try {
-          if (keepDraft) {
-            await saveState(`draft-${id}`, tab);
-            await setDraftIndexed(id, true);
-          } else {
-            await deleteState(`draft-${id}`);
-            await setDraftIndexed(id, false);
-          }
-        } catch (error) {
-          console.error('Failed to update recovery draft', error);
+      try {
+        if (keepDraft) {
+          await saveState(`draft-${id}`, tab);
+          await setDraftIndexed(id, true);
+        } else {
+          await deleteState(`draft-${id}`);
+          await setDraftIndexed(id, false);
         }
-      })();
+      } catch (error) {
+        console.error('Failed to update recovery draft', error);
+      }
     }
 
     dismissConflictForTab(id);
 
+    // Neutralize before last-tab quit so persistSession cannot resurrect discarded edits.
+    if (!keepDraft) {
+      tabs = tabs.map((item) => (item.id === id ? neutralizeDiscardedTab(item) : item));
+    }
+
     if (tabs.length === 1) {
+      // Closing the last tab quits on desktop (dirty prompt already handled above).
+      if (isDesktop()) {
+        await quitApp();
+        return;
+      }
       const replacement = createTab();
       tabs = [replacement];
       activeId = replacement.id;
@@ -1442,6 +1513,26 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     tabs = tabs.filter((candidate) => candidate.id !== id);
     if (activeId === id) activeId = tabs[Math.max(0, index - 1)].id;
     scheduleSessionPersistence();
+  }
+
+  /** Flush recovery drafts/session immediately; never write dirty content to real files. */
+  async function flushRecoveryStateForQuit() {
+    if (autosaveTimer) {
+      clearTimeout(autosaveTimer);
+      autosaveTimer = undefined;
+    }
+    if (recoveryTimer) {
+      clearTimeout(recoveryTimer);
+      recoveryTimer = undefined;
+    }
+    // Ensure session + drafts land even if restore was toggled mid-session.
+    if (settings.restoreSession) sessionPersistEnabled = true;
+    await persistSession();
+  }
+
+  async function quitApp() {
+    if (!isDesktop()) return;
+    await requestAppClose(() => flushRecoveryStateForQuit());
   }
 
   function scheduleSessionPersistence() {
@@ -1488,7 +1579,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
             activeId: snapshot.activeId,
             mode: snapshot.mode,
             workspaceRoot: snapshot.workspaceRoot,
-            tabs: snapshot.tabs,
+            tabs: slimSessionTabs(snapshot.tabs),
             recentFiles: snapshot.recentFiles,
             recentWorkspaces: snapshot.recentWorkspaces,
           };
@@ -1496,7 +1587,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         }
         // Draft bodies stay recoverable even when session restore is disabled.
         for (const tab of snapshot.tabs.filter(
-          (item) => !item.path || item.content !== item.savedContent || item.conflict
+          (item) => shouldPersistDraft(item) && !cancelledSaveTabIds.has(item.id)
         )) {
           if (generation !== persistGeneration) return;
           await saveState(`draft-${tab.id}`, tab);
@@ -1516,7 +1607,6 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       return;
     }
     let sessionRestored = false;
-    let recoveredCount = 0;
     let restoreFailed = false;
     try {
       const loadedSettings = await loadState<AppSettings>('settings');
@@ -1524,22 +1614,38 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         settings = normalizeSettings(loadedSettings);
         previousUpdateChannel = settings.updateChannel;
       }
-      const session = await loadState<SessionState>('session');
-      if (session?.version === 1 && settings.restoreSession && session.tabs.length) {
-        tabs = session.tabs;
+      const session = normalizeSessionState(await loadState<SessionState>('session'));
+      if (session && settings.restoreSession) {
+        // Adopt before hydrate/scan — scan no longer auto-adopts.
+        if (session.workspaceRoot) {
+          try {
+            session.workspaceRoot = await adoptWorkspaceFolder(session.workspaceRoot);
+          } catch {
+            session.workspaceRoot = '';
+          }
+        }
+        for (const tab of session.tabs) {
+          if (tab.path) {
+            try {
+              await registerConsentedPath(tab.path);
+            } catch {
+              // Missing / junction-escaped paths stay unrestorable until reopened.
+            }
+          }
+        }
+        tabs = await hydrateSessionTabs(session.tabs, readDocument);
         activeId =
-          session.activeId && session.tabs.some((tab) => tab.id === session.activeId)
+          typeof session.activeId === 'string' && tabs.some((tab) => tab.id === session.activeId)
             ? session.activeId
-            : session.tabs[0].id;
-        mode = ['source', 'split', 'preview'].includes(session.mode) ? session.mode : 'source';
+            : tabs[0].id;
+        mode = session.mode;
         workspaceRoot = session.workspaceRoot;
-        recentFiles = session.recentFiles ?? [];
-        recentWorkspaces = session.recentWorkspaces ?? [];
+        recentFiles = session.recentFiles;
+        recentWorkspaces = session.recentWorkspaces;
         sessionRestored = true;
       }
 
-      const recovered = await recoverOrphanDrafts(tabs);
-      recoveredCount = recovered.length;
+      const recovered = settings.restoreSession ? await recoverOrphanDrafts(tabs) : [];
       if (recovered.length) {
         const onlyWelcome =
           tabs.length === 1 &&
@@ -1580,8 +1686,33 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         const tabId = tab.id;
         const path = tab.path!;
         try {
+          let live = tabs.find((item) => item.id === tabId);
+          if (!live?.path || live.conflict) continue;
+
+          // Dirty tabs always full-probe so same size/mtime replacements are still detected.
+          if (live.content !== live.savedContent) {
+            const disk = await probeDocument(path);
+            live = tabs.find((item) => item.id === tabId);
+            if (!live?.path || live.conflict) continue;
+            if (live.fingerprint?.hash === disk.fingerprint.hash) continue;
+            tabs = tabs.map((item) => (item.id === tabId ? { ...item, conflict: true } : item));
+            openConflict(tabId);
+            continue;
+          }
+
+          const meta = await probeDocumentMeta(path);
+          live = tabs.find((item) => item.id === tabId);
+          if (!live?.path || live.conflict) continue;
+          // Light meta probe omits hash; compare mtime + size when hash is empty.
+          const metaUnchanged =
+            live.fingerprint &&
+            live.fingerprint.modifiedMs === meta.fingerprint.modifiedMs &&
+            live.fingerprint.size === meta.fingerprint.size &&
+            (meta.fingerprint.hash === '' || live.fingerprint.hash === meta.fingerprint.hash);
+          if (metaUnchanged) continue;
+
           const disk = await probeDocument(path);
-          const live = tabs.find((item) => item.id === tabId);
+          live = tabs.find((item) => item.id === tabId);
           if (!live?.path || live.conflict) continue;
           if (live.fingerprint?.hash === disk.fingerprint.hash) continue;
 
@@ -1605,6 +1736,12 @@ Try editing this document, or open a Markdown file from the toolbar.`;
                 : item
             );
             status = `${live.name} reloaded from disk`;
+            try {
+              await deleteState(`draft-${tabId}`);
+              await setDraftIndexed(tabId, false);
+            } catch (error) {
+              console.error('Failed to clear recovery draft after external reload', error);
+            }
           } else {
             tabs = tabs.map((item) => (item.id === tabId ? { ...item, conflict: true } : item));
             openConflict(tabId);
@@ -1647,6 +1784,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
             : item
         );
       }
+      conflictDialog?.close();
       conflictOpen = false;
       conflictTabId = null;
       const target = conflictReturnFocus;
@@ -1660,7 +1798,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   function remember(items: string[], value: string) {
-    return [value, ...items.filter((item) => item !== value)].slice(0, 20);
+    return [value, ...items.filter((item) => !pathsReferToSameFile(item, value))].slice(0, 20);
   }
 
   function readableError(error: unknown): string {
@@ -1717,7 +1855,13 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   >
     <div class="titlebar-main" data-tauri-drag-region={isWindowsChrome ? undefined : true}>
       {#if isWindowsChrome}
-        <WindowMenubar oncommand={runMenuCommand} updatesSupported={updatesSupported} />
+        <WindowMenubar oncommand={runMenuCommand} {updatesSupported} />
+        <span
+          class:pro={isFullEdition}
+          class="edition titlebar-edition-chip"
+          title={editionLabel}
+          aria-label={`${editionLabel} edition`}>{isFullEdition ? 'PRO' : 'CE'}</span
+        >
         <span class="titlebar-inline-divider" aria-hidden="true"></span>
       {:else}
         <div class="brand" data-tauri-drag-region>
@@ -1727,25 +1871,29 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         </div>
       {/if}
 
-      <div
-        class="titlebar-tabs"
-        data-tauri-drag-region={isWindowsChrome ? undefined : true}
-      >
+      <div class="titlebar-tabs" data-tauri-drag-region={isWindowsChrome ? undefined : true}>
         {#each tabs as tab (tab.id)}
+          {@const dirty = isTabDirty(tab)}
           <div class:active={tab.id === activeId} class="titlebar-tab">
             <button class="tab-select" onclick={() => (activeId = tab.id)}>
-              <span class:dirty={tab.content !== tab.savedContent}>{tab.name}</span>
-            </button>
-            {#if tabs.length > 1}
-              <button
-                class="tab-close"
-                title={`Close ${tab.name}`}
-                onclick={(event) => {
-                  event.stopPropagation();
-                  closeTab(tab.id);
-                }}><X /></button
+              <span
+                class:dirty
+                title={tab.conflict
+                  ? `${tab.name} (conflict with disk)`
+                  : tab.recovered
+                    ? `${tab.name} (recovered draft)`
+                    : undefined}>{tab.name}{tab.conflict ? ' !' : tab.recovered ? ' •' : ''}</span
               >
-            {/if}
+            </button>
+            <button
+              class="tab-close"
+              title={`Close ${tab.name}`}
+              aria-label={`Close ${tab.name}`}
+              onclick={(event) => {
+                event.stopPropagation();
+                void closeTab(tab.id);
+              }}><X /></button
+            >
           </div>
         {/each}
         <button class="titlebar-new-tab" onclick={newDocument} title="New tab">+</button>
@@ -1774,16 +1922,24 @@ Try editing this document, or open a Markdown file from the toolbar.`;
           >
         </div>
         <span class="toolbar-divider toolbar-divider-mode"></span>
-        <div class="titlebar-mode-toggle" aria-label="Editor mode">
-          <button class:active={mode === 'source'} onclick={() => (mode = 'source')} title="Editor"
-            >Editor</button
+        <div class="titlebar-mode-toggle" role="radiogroup" aria-label="Editor mode">
+          <button
+            role="radio"
+            aria-checked={mode === 'source'}
+            class:active={mode === 'source'}
+            onclick={() => (mode = 'source')}
+            title="Editor">Editor</button
           >
           <button
+            role="radio"
+            aria-checked={mode === 'split'}
             class:active={mode === 'split'}
             onclick={() => (mode = 'split')}
             title="Split view">Split</button
           >
           <button
+            role="radio"
+            aria-checked={mode === 'preview'}
             class:active={mode === 'preview'}
             onclick={() => (mode = 'preview')}
             title="Preview">Preview</button
@@ -1794,11 +1950,12 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         <button
           class="icon-button"
           title={`Command palette (${formatShortcut({ mod: true, shift: true, key: 'p' })})`}
-          onclick={openCommandPalette}>{modKeyLabel()}</button
+          aria-label={`Command palette (${formatShortcut({ mod: true, shift: true, key: 'p' })})`}
+          onclick={openCommandPalette}><Command /></button
         >
       </div>
       {#if isWindowsChrome}
-        <WindowControls onclose={() => void requestAppClose(hasUnsavedChanges)} />
+        <WindowControls onclose={() => void quitApp()} />
       {/if}
     </div>
   </header>
@@ -2061,7 +2218,11 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
     <main class="main-area">
       <section class:split-layout={mode === 'split'} class="editor-grid">
-        <div class="source-pane" class:pane-hidden={mode === 'preview'} aria-hidden={mode === 'preview'}>
+        <div
+          class="source-pane"
+          class:pane-hidden={mode === 'preview'}
+          aria-hidden={mode === 'preview'}
+        >
           <MarkdownEditor
             documentId={activeTab?.id ?? 'empty'}
             value={activeTab?.content ?? ''}
@@ -2079,7 +2240,6 @@ Try editing this document, or open a Markdown file from the toolbar.`;
           />
         </div>
         {#if mode !== 'source'}
-          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
           <div class="preview-pane" role="presentation" onclick={handlePreviewClick}>
             <!-- Preview HTML is produced by rehype-sanitize in src/lib/preview.ts. -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
@@ -2109,11 +2269,15 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     }}
   >
     <dialog
-      open
+      bind:this={settingsDialog}
       class="settings-modal tabbed-layout"
       aria-modal="true"
       aria-labelledby="settings-title"
       onkeydown={(event) => handleDismissibleDialogKeydown(event, closeSettings)}
+      oncancel={(event) => {
+        event.preventDefault();
+        closeSettings();
+      }}
     >
       <header class="settings-header">
         <h2 id="settings-title">Settings</h2>
@@ -2287,14 +2451,17 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
               <div class="settings-group toggle-group">
                 <label class="switch-container">
-                  <span>Keep untitled drafts silently when closing</span>
+                  <span>Keep untitled drafts silently when closing tabs</span>
                   <input type="checkbox" bind:checked={settings.keepDraftsSilently} />
                   <span class="switch-slider"></span>
                 </label>
               </div>
 
               <p class="settings-note">
-                Recovery drafts stay locally in your operating system's app-data folder.
+                Closing the app temp-saves open tabs in your OS app-data folder and restores them
+                next launch without writing your Markdown files. Closing a tab still asks Save /
+                Don't Save / Cancel unless silent untitled drafts are enabled (path-backed files
+                always prompt).
               </p>
             </div>
           {:else if activeSettingsTab === 'about'}
@@ -2453,11 +2620,15 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     }}
   >
     <dialog
-      open
+      bind:this={namePromptDialog}
       class="settings-modal"
       aria-modal="true"
       aria-labelledby="name-prompt-title"
       onkeydown={(event) => handleDismissibleDialogKeydown(event, () => resolveNamePrompt(null))}
+      oncancel={(event) => {
+        event.preventDefault();
+        resolveNamePrompt(null);
+      }}
     >
       <header>
         <h2 id="name-prompt-title">{namePrompt.title}</h2>
@@ -2492,14 +2663,27 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 {#if conflictOpen}
   <div class="modal-backdrop">
     <dialog
-      open
+      bind:this={conflictDialog}
       class="settings-modal"
       aria-modal="true"
       aria-labelledby="conflict-title"
       onkeydown={trapDialogFocus}
+      oncancel={(event) => {
+        event.preventDefault();
+        dismissConflictForTab(conflictTabId ?? '');
+      }}
     >
       <h2 id="conflict-title">File changed outside Tuxedo MD</h2>
-      <p>Autosave is paused to protect both versions.</p>
+      <p>
+        {#if conflictTabId}
+          {@const conflictTab = tabs.find((item) => item.id === conflictTabId)}
+          {conflictTab
+            ? `"${conflictTab.name}" changed on disk. Autosave is paused to protect both versions.`
+            : 'Autosave is paused to protect both versions.'}
+        {:else}
+          Autosave is paused to protect both versions.
+        {/if}
+      </p>
       <div class="modal-actions">
         <button bind:this={conflictInitialFocus} onclick={() => resolveConflict('reload')}
           >Reload disk version</button

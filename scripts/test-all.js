@@ -16,6 +16,7 @@ const checks = [
   ['Format', npm, ['run', 'format:check']],
   ['Tests', npm, ['run', 'test:cov']],
   ['Updater fixtures', npm, ['run', 'validate:updater']],
+  ['Prod audit', npm, ['run', 'audit:prod']],
   ['Rust check', 'cargo', ['check', '--locked', '--manifest-path', 'src-tauri/Cargo.toml']],
   [
     'Rust clippy',
@@ -32,10 +33,11 @@ const checks = [
     ],
   ],
   [
-    'Rust tests',
+    'MAS rust check',
     'cargo',
-    ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets'],
+    ['check', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'mas'],
   ],
+  ['Edition gate tests', npm, ['run', 'test:edition']],
 ];
 
 clearQualityGateProof(root);

@@ -1,12 +1,14 @@
 import { isDesktop } from './tauri';
 
-const DRAWER_WIDTH = 240;
-const MINIMUM_WINDOW_WIDTH = 760;
-let drawerExpandedWindow = false;
+export type WindowEffectState = 'native' | 'css' | 'opaque';
 
 function reducedTransparency(): boolean {
   return window.matchMedia?.('(prefers-reduced-transparency: reduce)').matches ?? false;
 }
+
+const DRAWER_WIDTH = 240;
+const MINIMUM_WINDOW_WIDTH = 760;
+let drawerExpandedWindow = false;
 
 export async function resizeWindowForDrawer(open: boolean): Promise<boolean> {
   if (!isDesktop()) return false;
@@ -25,7 +27,6 @@ export async function resizeWindowForDrawer(open: boolean): Promise<boolean> {
     ]);
 
     if (maximized || fullscreen) {
-      // Maximized/fullscreen skips resize; drop the flag so a later close doesn't over-shrink.
       drawerExpandedWindow = false;
       return false;
     }
@@ -52,46 +53,78 @@ export async function resizeWindowForDrawer(open: boolean): Promise<boolean> {
   }
 }
 
-export type WindowEffectState = 'native' | 'opaque';
-
+/** off/a11y/opaque→opaque; system→native else opaque; on→native else CSS frost. */
 export async function applyNativeWindowEffects(
   glassEffects: 'system' | 'on' | 'off',
-  dark: boolean
+  dark: boolean,
+  options?: { opaqueWindow?: boolean }
 ): Promise<WindowEffectState> {
   if (!isDesktop()) return 'opaque';
+
+  // `system` follows OS glass or solid; only `on` may fall back to CSS frost.
+  const cssFallback = glassEffects === 'on';
 
   try {
     const { Effect, EffectState, getCurrentWindow } = await import('@tauri-apps/api/window');
     const window = getCurrentWindow();
-    if (glassEffects === 'off' || reducedTransparency()) {
+    const paintClear = () => window.setBackgroundColor([0, 0, 0, 0]);
+    const paintOpaque = () =>
+      window.setBackgroundColor(dark ? [0x1e, 0x1e, 0x1e, 0xff] : [0xf5, 0xf5, 0xf5, 0xff]);
+
+    if (glassEffects === 'off' || reducedTransparency() || options?.opaqueWindow) {
       await window.clearEffects();
+      await paintOpaque();
       return 'opaque';
     }
 
     if (navigator.userAgent.includes('Macintosh')) {
-      await window.setEffects({
-        effects: [Effect.HudWindow],
-        state: EffectState.FollowsWindowActiveState,
-      });
-      return 'native';
+      try {
+        await paintClear();
+        await window.setEffects({
+          effects: [Effect.HudWindow],
+          state: EffectState.FollowsWindowActiveState,
+        });
+        return 'native';
+      } catch {
+        await window.clearEffects();
+        await paintOpaque();
+        return cssFallback ? 'css' : 'opaque';
+      }
     }
 
     if (navigator.userAgent.includes('Windows')) {
       try {
-        await window.setEffects({ effects: [dark ? Effect.Mica : Effect.Tabbed] });
+        await paintClear();
+        try {
+          await window.setEffects({ effects: [dark ? Effect.Mica : Effect.Tabbed] });
+        } catch {
+          const acrylicTint: [number, number, number, number] = dark
+            ? [30, 30, 30, 180]
+            : [245, 245, 245, 200];
+          await window.setEffects({ effects: [Effect.Acrylic], color: acrylicTint });
+        }
+        return 'native';
       } catch {
-        const acrylicTint: [number, number, number, number] = dark
-          ? [30, 30, 30, 180]
-          : [245, 245, 245, 200];
-        await window.setEffects({ effects: [Effect.Acrylic], color: acrylicTint });
+        await window.clearEffects();
+        await paintOpaque();
+        return cssFallback ? 'css' : 'opaque';
       }
-      return 'native';
     }
 
+    // Linux (and unknown hosts): no native materials — opaque for system, CSS for on.
     await window.clearEffects();
-    return 'opaque';
+    await paintOpaque();
+    return cssFallback ? 'css' : 'opaque';
   } catch {
-    // Unsupported and intentionally opaque builds retain the solid CSS surface treatment.
-    return 'opaque';
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().setBackgroundColor(
+        dark ? [0x1e, 0x1e, 0x1e, 0xff] : [0xf5, 0xf5, 0xf5, 0xff]
+      );
+    } catch {
+      // Best-effort paint for builds that reject background color.
+    }
+    if (glassEffects === 'off' || options?.opaqueWindow || !cssFallback) return 'opaque';
+    return 'css';
   }
 }

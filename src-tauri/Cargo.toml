@@ -18,7 +18,6 @@ tauri-build = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = { version = "1", features = ["pure"] }
-# macOSPrivateApi in tauri.conf.json requires this feature present on the dependency.
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
@@ -39,7 +38,9 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [features]
 default = []
-# App Store builds pass --features mas to skip overlay private-API chrome usage.
+# App Store builds pass --features mas (opaque window / store chrome). Tauri's
+# allowlist requires macos-private-api on the dependency whenever conf enables it;
+# App Store overlay sets macOSPrivateApi: false so private APIs are not used at runtime.
 mas = []
 
 [dev-dependencies]

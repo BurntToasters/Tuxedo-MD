@@ -6,8 +6,7 @@ export function githubAuthorizationForUrl(url, token) {
   } catch {
     return undefined;
   }
-  return parsed.protocol === "https:" &&
-    parsed.hostname.toLowerCase() === "github.com"
+  return parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === 'github.com'
     ? `Bearer ${token}`
     : undefined;
 }

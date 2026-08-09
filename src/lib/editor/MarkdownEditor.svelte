@@ -275,6 +275,8 @@
       lastSc = spellcheck;
       lastLw = lineWrap;
 
+      // Drop cached states so inactive tabs rebuild with the new editor config.
+      states.clear();
       const currentDoc = view.state.doc.toString();
       const { anchor, head } = view.state.selection.main;
       const nextState = createState(currentDoc, { anchor, head });
@@ -320,6 +322,8 @@
   });
 
   $effect(() => {
+    // Local bookkeeping only — not reactive UI state.
+    // eslint-disable-next-line svelte/prefer-svelte-reactivity -- ephemeral prune set
     const keep = new Set(retainedDocumentIds);
     if (!keep.has(documentId)) keep.add(documentId);
     for (const id of [...states.keys()]) {

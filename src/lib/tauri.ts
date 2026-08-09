@@ -14,13 +14,23 @@ export function isDesktop(): boolean {
   return '__TAURI_INTERNALS__' in window;
 }
 
+export async function registerConsentedPath(path: string): Promise<void> {
+  await invoke('register_consented_path', { path });
+}
+
+export async function adoptWorkspaceFolder(root: string): Promise<string> {
+  return invoke<string>('adopt_workspace_folder', { root });
+}
+
 export async function chooseDocument(): Promise<FileDocument | null> {
   const path = await open({
     multiple: false,
     directory: false,
-    filters: [{ name: 'Markdown', extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] }],
+    filters: [{ name: 'Markdown', extensions: ['md', 'markdown', 'mdown', 'mkd'] }],
   });
-  return path ? invoke<FileDocument>('open_document', { path }) : null;
+  if (!path) return null;
+  await registerConsentedPath(path);
+  return invoke<FileDocument>('open_document', { path });
 }
 
 export async function chooseWorkspace(): Promise<{
@@ -29,8 +39,9 @@ export async function chooseWorkspace(): Promise<{
 } | null> {
   const root = await open({ multiple: false, directory: true });
   if (!root) return null;
-  const entries = await invoke<WorkspaceEntry[]>('scan_workspace', { root });
-  return { root, entries };
+  const adopted = await adoptWorkspaceFolder(root);
+  const entries = await invoke<WorkspaceEntry[]>('scan_workspace', { root: adopted });
+  return { root: adopted, entries };
 }
 
 export async function readDocument(path: string): Promise<FileDocument> {
@@ -88,14 +99,23 @@ export async function writeDocument(
 }
 
 export async function chooseSavePath(defaultPath?: string | null): Promise<string | null> {
-  return save({
+  const path = await save({
     defaultPath: defaultPath ?? 'Untitled.md',
     filters: [{ name: 'Markdown', extensions: ['md'] }],
   });
+  if (!path) return null;
+  await registerConsentedPath(path);
+  return path;
 }
 
 export async function probeDocument(path: string): Promise<FileDocument> {
   return invoke<FileDocument>('probe_document', { path });
+}
+
+export async function probeDocumentMeta(
+  path: string
+): Promise<{ path: string; name: string; fingerprint: DocumentFingerprint }> {
+  return invoke('probe_document_meta', { path });
 }
 
 export async function loadState<T>(key: string): Promise<T | null> {

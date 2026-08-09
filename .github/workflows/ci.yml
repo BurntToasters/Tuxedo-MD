@@ -8,7 +8,7 @@ on:
 jobs:
   quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -25,3 +25,21 @@ jobs:
       - run: npm ci
       - run: npm run test:all
       - run: npm run validate:updater
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
+      - run: cargo check --locked --manifest-path src-tauri/Cargo.toml --features mas

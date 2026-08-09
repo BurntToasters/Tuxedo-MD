@@ -34,8 +34,14 @@ if (!has('APPLE_PASSWORD') && has('APPLE_APP_SPECIFIC_PASSWORD')) {
 }
 
 const missing = [];
-if (required.tauriSigning && !args.includes('--no-bundle') && !has('TAURI_SIGNING_PRIVATE_KEY')) {
-  missing.push('TAURI_SIGNING_PRIVATE_KEY');
+if (required.tauriSigning && !has('TAURI_SIGNING_PRIVATE_KEY')) {
+  if (args.includes('--no-bundle')) {
+    console.warn(
+      '[tauri-build] --require-tauri-signing ignored for --no-bundle (no updater artifacts).'
+    );
+  } else {
+    missing.push('TAURI_SIGNING_PRIVATE_KEY');
+  }
 }
 if (macBuild && required.macSigning && !has('APPLE_SIGNING_IDENTITY')) {
   missing.push('APPLE_SIGNING_IDENTITY');
@@ -107,7 +113,7 @@ if (prerelease && windowsBuild && !args.includes('--no-bundle')) {
 const configPath = valueAfter('--config');
 const isAppStoreBuild = /tauri\.appstore\.conf\.json$/i.test(configPath.replace(/\\/g, '/'));
 if (isAppStoreBuild) {
-  // Skip overlay private-API chrome usage in the App Store binary.
+  // Mark App Store binaries (opaque window / store chrome via cfg!(feature = "mas")).
   if (!args.some((arg) => arg === '--features' || arg.startsWith('--features='))) {
     args.push('--features', 'mas');
   }
@@ -121,13 +127,14 @@ if (required.windowsSigning && !skipWindowsCodeSigning) {
   }
 }
 
-execFileSync(process.platform === 'win32' ? 'npx.cmd' : 'npx', ['tauri', 'build', ...args], {
+const root = fileURLToPath(new URL('..', import.meta.url));
+const tauriCli = path.join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
+execFileSync(process.execPath, [tauriCli, 'build', ...args], {
   stdio: 'inherit',
   env: process.env,
 });
 
 if (required.windowsSigning && !skipWindowsCodeSigning) {
-  const root = fileURLToPath(new URL('..', import.meta.url));
   const targetReleaseDir = path.join(root, 'src-tauri', 'target', target, 'release');
   execFileSync(
     'powershell.exe',

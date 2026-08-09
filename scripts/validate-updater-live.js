@@ -18,19 +18,19 @@
  * Linux ARM64) to the required set.
  */
 
-import fs from "fs";
-import os from "os";
-import path from "path";
-import { fileURLToPath } from "url";
-import { spawnSync } from "child_process";
-import { githubAuthorizationForUrl } from "./updater-live-helpers.js";
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { spawnSync } from 'child_process';
+import { githubAuthorizationForUrl } from './updater-live-helpers.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.join(__dirname, "..");
-const validator = path.join(root, "scripts", "validate-updater-manifest.js");
-const requireLive = process.env.REQUIRE_UPDATER_LIVE === "1";
+const root = path.join(__dirname, '..');
+const validator = path.join(root, 'scripts', 'validate-updater-manifest.js');
+const requireLive = process.env.REQUIRE_UPDATER_LIVE === '1';
 const args = process.argv.slice(2);
-const shapeOnly = args.includes("--shape-only");
+const shapeOnly = args.includes('--shape-only');
 
 function optionValue(name) {
   const inline = args.find((arg) => arg.startsWith(`${name}=`));
@@ -40,87 +40,81 @@ function optionValue(name) {
 }
 
 function currentPackageVersion() {
-  const packageJson = JSON.parse(
-    fs.readFileSync(path.join(root, "package.json"), "utf8"),
-  );
-  return String(packageJson.version || "").trim();
+  const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  return String(packageJson.version || '').trim();
 }
 
 function parseTargets(value) {
   return Array.from(
     new Set(
-      String(value || "")
-        .split(",")
+      String(value || '')
+        .split(',')
         .map((target) => target.trim())
-        .filter(Boolean),
-    ),
+        .filter(Boolean)
+    )
   );
 }
 
 const TARGETS = [
-  "windows-x86_64",
-  "windows-aarch64",
-  "darwin-aarch64",
-  "darwin-x86_64",
-  "linux-x86_64",
-  "linux-aarch64",
-  "windows-beta-x86_64",
-  "windows-beta-x86_64-nsis",
-  "windows-beta-aarch64",
-  "windows-beta-aarch64-nsis",
-  "darwin-beta-aarch64",
-  "darwin-beta-aarch64-app",
-  "darwin-beta-x86_64",
-  "darwin-beta-x86_64-app",
-  "linux-beta-x86_64",
-  "linux-beta-x86_64-appimage",
-  "linux-beta-x86_64-deb",
-  "linux-beta-x86_64-rpm",
-  "linux-beta-aarch64",
-  "linux-beta-aarch64-appimage",
-  "linux-beta-aarch64-deb",
-  "linux-beta-aarch64-rpm",
+  'windows-x86_64',
+  'windows-aarch64',
+  'darwin-aarch64',
+  'darwin-x86_64',
+  'linux-x86_64',
+  'linux-aarch64',
+  'windows-beta-x86_64',
+  'windows-beta-x86_64-nsis',
+  'windows-beta-aarch64',
+  'windows-beta-aarch64-nsis',
+  'darwin-beta-aarch64',
+  'darwin-beta-aarch64-app',
+  'darwin-beta-x86_64',
+  'darwin-beta-x86_64-app',
+  'linux-beta-x86_64',
+  'linux-beta-x86_64-appimage',
+  'linux-beta-x86_64-deb',
+  'linux-beta-x86_64-rpm',
+  'linux-beta-aarch64',
+  'linux-beta-aarch64-appimage',
+  'linux-beta-aarch64-deb',
+  'linux-beta-aarch64-rpm',
 ];
 
 const STANDARD_STABLE_TARGETS = [
-  "windows-x86_64",
-  "windows-aarch64",
-  "darwin-aarch64",
-  "darwin-x86_64",
-  "linux-x86_64",
+  'windows-x86_64',
+  'windows-aarch64',
+  'darwin-aarch64',
+  'darwin-x86_64',
+  'linux-x86_64',
 ];
 
 // MSI beta feeds are optional (prerelease Windows builds often strip MSI).
 const STANDARD_BETA_TARGETS = [
-  "windows-beta-x86_64",
-  "windows-beta-x86_64-nsis",
-  "windows-beta-aarch64",
-  "windows-beta-aarch64-nsis",
-  "darwin-beta-aarch64",
-  "darwin-beta-aarch64-app",
-  "darwin-beta-x86_64",
-  "darwin-beta-x86_64-app",
-  "linux-beta-x86_64",
-  "linux-beta-x86_64-appimage",
-  "linux-beta-x86_64-deb",
-  "linux-beta-x86_64-rpm",
+  'windows-beta-x86_64',
+  'windows-beta-x86_64-nsis',
+  'windows-beta-aarch64',
+  'windows-beta-aarch64-nsis',
+  'darwin-beta-aarch64',
+  'darwin-beta-aarch64-app',
+  'darwin-beta-x86_64',
+  'darwin-beta-x86_64-app',
+  'linux-beta-x86_64',
+  'linux-beta-x86_64-appimage',
+  'linux-beta-x86_64-deb',
+  'linux-beta-x86_64-rpm',
 ];
 
 const requestedExpectedVersion =
-  optionValue("--expected-version") ||
-  process.env.EXPECTED_UPDATER_VERSION ||
-  "";
+  optionValue('--expected-version') || process.env.EXPECTED_UPDATER_VERSION || '';
 const expectedVersion =
-  requestedExpectedVersion === "current"
+  requestedExpectedVersion === 'current'
     ? currentPackageVersion()
     : requestedExpectedVersion.trim();
-const explicitlyRequiredTargets = parseTargets(
-  process.env.REQUIRED_UPDATER_TARGETS,
-);
+const explicitlyRequiredTargets = parseTargets(process.env.REQUIRED_UPDATER_TARGETS);
 const expectedIsPrerelease = /-(alpha|beta|rc)\.\d+$/i.test(expectedVersion);
 const expectedIsBeta = expectedIsPrerelease;
 const standardRequiredTargets =
-  requestedExpectedVersion === "current"
+  requestedExpectedVersion === 'current'
     ? expectedIsBeta
       ? STANDARD_BETA_TARGETS
       : [...STANDARD_STABLE_TARGETS, ...STANDARD_BETA_TARGETS]
@@ -132,36 +126,36 @@ const standardRequiredTargets =
         : [...STANDARD_STABLE_TARGETS, ...STANDARD_BETA_TARGETS]
       : [];
 const requiredTargets = Array.from(
-  new Set([...standardRequiredTargets, ...explicitlyRequiredTargets]),
+  new Set([...standardRequiredTargets, ...explicitlyRequiredTargets])
 );
 const selectedTargets =
   requiredTargets.length > 0
     ? requiredTargets
     : expectedVersion
-      ? TARGETS.filter((target) => target.includes("-beta-") === expectedIsBeta)
+      ? TARGETS.filter((target) => target.includes('-beta-') === expectedIsBeta)
       : TARGETS;
 
 const BASE = (
   process.env.UPDATER_LIVE_BASE_URL ||
-  "https://github.com/BurntToasters/Tuxedo-MD/releases/latest/download"
-).replace(/\/+$/, "");
+  'https://github.com/BurntToasters/Tuxedo-MD/releases/latest/download'
+).replace(/\/+$/, '');
 
 async function fetchManifest(target) {
   const url = `${BASE}/latest-${target}.json`;
   const headers = {
-    Accept: "application/json",
-    "User-Agent": "tuxedomd-ci",
+    Accept: 'application/json',
+    'User-Agent': 'tuxedomd-ci',
   };
   const authorization = githubAuthorizationForUrl(
     url,
-    process.env.GH_TOKEN || process.env.GITHUB_TOKEN,
+    process.env.GH_TOKEN || process.env.GITHUB_TOKEN
   );
   if (authorization) {
     headers.Authorization = authorization;
   }
   const response = await fetch(url, {
     headers,
-    redirect: "follow",
+    redirect: 'follow',
   });
   if (response.status === 404) {
     return { target, url, status: 404, body: null };
@@ -180,17 +174,17 @@ function assertExpectedVersion(target, body) {
     manifest = JSON.parse(body);
   } catch (error) {
     throw new Error(
-      `latest-${target}.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+      `latest-${target}.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
     );
   }
   if (manifest.version !== expectedVersion) {
     throw new Error(
-      `latest-${target}.json reports version ${JSON.stringify(manifest.version)}, expected ${expectedVersion}.`,
+      `latest-${target}.json reports version ${JSON.stringify(manifest.version)}, expected ${expectedVersion}.`
     );
   }
 }
 
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "tuxedomd-updater-live-"));
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tuxedomd-updater-live-'));
 const files = [];
 const skipped = [];
 
@@ -204,22 +198,20 @@ try {
     }
     assertExpectedVersion(target, result.body);
     const filePath = path.join(tmpDir, `latest-${target}.json`);
-    fs.writeFileSync(filePath, result.body, "utf8");
+    fs.writeFileSync(filePath, result.body, 'utf8');
     files.push(filePath);
     console.log(`updater-live: fetched ${result.url}`);
   }
 
   if (files.length === 0) {
-    const message =
-      "updater-live: no published manifests found (all 404); nothing to validate";
+    const message = 'updater-live: no published manifests found (all 404); nothing to validate';
     if (requireLive || expectedVersion || requiredTargets.length > 0) {
       const requirements = [
-        requireLive && "REQUIRE_UPDATER_LIVE=1",
+        requireLive && 'REQUIRE_UPDATER_LIVE=1',
         expectedVersion && `expected version ${expectedVersion}`,
-        requiredTargets.length > 0 &&
-          `required targets ${requiredTargets.join(", ")}`,
+        requiredTargets.length > 0 && `required targets ${requiredTargets.join(', ')}`,
       ].filter(Boolean);
-      console.error(`${message} (${requirements.join("; ")})`);
+      console.error(`${message} (${requirements.join('; ')})`);
       process.exit(1);
     }
     console.warn(message);
@@ -227,7 +219,7 @@ try {
   }
   if (requiredTargets.length > 0 && skipped.length > 0) {
     console.error(
-      `updater-live: required manifest${skipped.length === 1 ? " is" : "s are"} missing: ${skipped.join(", ")}.`,
+      `updater-live: required manifest${skipped.length === 1 ? ' is' : 's are'} missing: ${skipped.join(', ')}.`
     );
     process.exit(1);
   }
@@ -239,22 +231,22 @@ try {
     const pkg = currentPackageVersion();
     const pkgIsBeta = /-beta\.\d+$/.test(pkg);
     for (const filePath of files) {
-      const base = path.basename(filePath, ".json"); // latest-<target>
-      const target = base.replace(/^latest-/, "");
-      if (target.includes("-beta-") !== pkgIsBeta) continue;
-      const body = fs.readFileSync(filePath, "utf8");
+      const base = path.basename(filePath, '.json'); // latest-<target>
+      const target = base.replace(/^latest-/, '');
+      if (target.includes('-beta-') !== pkgIsBeta) continue;
+      const body = fs.readFileSync(filePath, 'utf8');
       let manifest;
       try {
         manifest = JSON.parse(body);
       } catch (error) {
         console.error(
-          `updater-live: ${base}.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+          `updater-live: ${base}.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
         );
         process.exit(1);
       }
       if (manifest.version !== pkg) {
         console.error(
-          `updater-live: ${base}.json reports version ${JSON.stringify(manifest.version)}, expected package.json ${pkg} (same-channel stale feed). Pass --expected-version=… to override.`,
+          `updater-live: ${base}.json reports version ${JSON.stringify(manifest.version)}, expected package.json ${pkg} (same-channel stale feed). Pass --expected-version=… to override.`
         );
         process.exit(1);
       }
@@ -262,7 +254,7 @@ try {
   }
 
   const check = spawnSync(process.execPath, [validator, ...files], {
-    encoding: "utf8",
+    encoding: 'utf8',
   });
   if (check.stdout) process.stdout.write(check.stdout);
   if (check.stderr) process.stderr.write(check.stderr);
@@ -270,7 +262,7 @@ try {
     process.exit(check.status ?? 1);
   }
   console.log(
-    `updater-live: ok (${files.length} published, ${skipped.length} missing${expectedVersion ? `, version ${expectedVersion}` : ""})`,
+    `updater-live: ok (${files.length} published, ${skipped.length} missing${expectedVersion ? `, version ${expectedVersion}` : ''})`
   );
 } finally {
   fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -27,7 +27,7 @@ describe('CE-only GitHub release policy', () => {
     expect(gpgSign).toContain('isStoreOrProArtifact');
     expect(gpgSign).toMatch(/TuxedoMD\\.Pro_/);
     expect(gpgSign).toMatch(/msix/);
-    expect(gpgSign).toContain("from \"./updater-targets.js\"");
+    expect(gpgSign).toContain("from './updater-targets.js'");
     expect(upload).toContain('isStoreOrProArtifact');
     expect(upload).toContain("path.join(root, 'release')");
     expect(upload).not.toContain("path.join(root, 'msstore')");
@@ -42,7 +42,9 @@ describe('CE-only GitHub release policy', () => {
     expect(pkg.scripts['validate:updater']).toContain('validate-updater-manifest');
     expect(pkg.scripts['validate:updater:live']).toContain('REQUIRE_UPDATER_LIVE=1');
     expect(pkg.scripts['validate:updater:live:soft']).toContain('--shape-only');
-    expect(pkg.scripts['release:updater-manifests']).toContain('ALLOW_STANDALONE_UPDATER_MANIFESTS=1');
+    expect(pkg.scripts['release:updater-manifests']).toContain(
+      'ALLOW_STANDALONE_UPDATER_MANIFESTS=1'
+    );
     const finalize = fs.readFileSync(path.join(root, 'scripts/finalize-release-assets.js'), 'utf8');
     expect(finalize).toContain('SKIP_RELEASE_MIRROR');
     expect(finalize).toContain('AFTER_PACK_LOC');
@@ -82,7 +84,10 @@ describe('CE-only GitHub release policy', () => {
   });
 
   it('requires draft releases and encodes MSIX prerelease revisions', async () => {
-    const ensureDraft = fs.readFileSync(path.join(root, 'scripts/ensure-draft-release.cjs'), 'utf8');
+    const ensureDraft = fs.readFileSync(
+      path.join(root, 'scripts/ensure-draft-release.cjs'),
+      'utf8'
+    );
     expect(ensureDraft).toContain('isDraft');
     expect(ensureDraft).toContain('already published');
     const { toMsixIdentityVersion } = await import('../../scripts/msstore-version.js');

@@ -96,32 +96,37 @@
       class="tree-row"
       class:is-directory={row.kind === 'directory'}
       class:is-active={row.kind === 'file' && row.path === activePath}
-      role="treeitem"
-      aria-level={row.depth + 1}
-      aria-selected={row.kind === 'file' && row.path === activePath}
-      aria-expanded={row.kind === 'directory' ? row.expanded : undefined}
-      tabindex={row.id === tabbableId ? 0 : -1}
-      data-row-id={row.id}
+      role="none"
       style={`--tree-depth:${row.depth}`}
       title={row.id}
-      onkeydown={(event) => handleKeydown(event, row, index)}
-      onfocus={() => (focusedId = row.id)}
-      onclick={() => (row.kind === 'directory' ? ontoggle(row) : onopen(row))}
-      ondblclick={() => row.kind === 'file' && onopen(row)}
     >
-      <span class="tree-twisty" aria-hidden="true">
-        {#if row.kind === 'directory'}
-          {#if row.expanded}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
-        {/if}
-      </span>
-      <span class="tree-icon" aria-hidden="true">
-        {#if row.kind === 'directory'}
-          {#if row.expanded}<FolderOpen size={13} />{:else}<FolderClosed size={13} />{/if}
-        {:else}
-          <FileText size={13} />
-        {/if}
-      </span>
-      <span class="tree-label">{row.name}</span>
+      <div
+        class="tree-item"
+        role="treeitem"
+        aria-level={row.depth + 1}
+        aria-selected={row.kind === 'file' && row.path === activePath}
+        aria-expanded={row.kind === 'directory' ? row.expanded : undefined}
+        tabindex={row.id === tabbableId ? 0 : -1}
+        data-row-id={row.id}
+        onkeydown={(event) => handleKeydown(event, row, index)}
+        onfocus={() => (focusedId = row.id)}
+        onclick={() => (row.kind === 'directory' ? ontoggle(row) : onopen(row))}
+        ondblclick={() => row.kind === 'file' && onopen(row)}
+      >
+        <span class="tree-twisty" aria-hidden="true">
+          {#if row.kind === 'directory'}
+            {#if row.expanded}<ChevronDown size={13} />{:else}<ChevronRight size={13} />{/if}
+          {/if}
+        </span>
+        <span class="tree-icon" aria-hidden="true">
+          {#if row.kind === 'directory'}
+            {#if row.expanded}<FolderOpen size={13} />{:else}<FolderClosed size={13} />{/if}
+          {:else}
+            <FileText size={13} />
+          {/if}
+        </span>
+        <span class="tree-label">{row.name}</span>
+      </div>
       {#if oncontextaction}
         <span class="tree-actions">
           {#if row.kind === 'file'}
