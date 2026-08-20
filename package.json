@@ -100,7 +100,7 @@
     "build:linux:x64:prepared": "cross-env TUXEDO_EDITION=full VITE_TUXEDO_EDITION=full dotenv -e .env -- node scripts/tauri-build.js --require-tauri-signing --target x86_64-unknown-linux-gnu --bundles appimage,deb,rpm",
     "build:linux:x64": "npm run rust:target:linux:x64 && npm run sync-version && npm run licenses && npm run build:linux:x64:prepared",
     "build:linux": "npm run build:linux:x64",
-    "workspace:bootstrap": "npm run rust:update && npm ci && npm run sync-version && cargo check --manifest-path src-tauri/Cargo.toml -q",
+    "workspace:bootstrap": "npm run rust:update && npm ci && npm run sync-version && cargo check --locked --manifest-path src-tauri/Cargo.toml -q",
     "workspace:prepare": "npm run workspace:bootstrap && npm run test:all",
     "release:prepare": "npm run workspace:prepare && npm run dist:clean-release-artifacts",
     "release:session:verify": "node scripts/release-session.js",

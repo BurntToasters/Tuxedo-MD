@@ -129,7 +129,7 @@ if (required.windowsSigning && !skipWindowsCodeSigning) {
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const tauriCli = path.join(root, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
-execFileSync(process.execPath, [tauriCli, 'build', ...args], {
+execFileSync(process.execPath, [tauriCli, 'build', ...args, '--', '--locked'], {
   stdio: 'inherit',
   env: process.env,
 });
