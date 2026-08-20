@@ -48,7 +48,11 @@ function main({
   repoRoot = root,
   clearProof = clearQualityGateProof,
   recordProof = recordSuccessfulQualityGate,
-  runner = (command, args) => spawnSync(command, args, { stdio: 'inherit', shell: false }),
+  runner = (command, args) =>
+    spawnSync(command, args, {
+      stdio: 'inherit',
+      shell: process.platform === 'win32' && /\.cmd$/i.test(command),
+    }),
   log = console.log,
 } = {}) {
   const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
