@@ -33,6 +33,8 @@
     "test:watch": "vitest",
     "test:cov": "vitest run --coverage --coverage.reportsDirectory=coverage-headless",
     "test:all": "node scripts/test-all.js",
+    "test:cargo-safe-update": "node --test scripts/cargo-safe-update.test.mjs",
+    "check:cargo-update-policy": "node scripts/check-cargo-update-policy.mjs",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
     "lint": "eslint src/ scripts/ vite.config.ts vitest.config.ts",

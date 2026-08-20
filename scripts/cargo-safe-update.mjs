@@ -233,7 +233,7 @@ function copyWorkspace(sourceRoot, destinationRoot) {
   });
 }
 
-function prepareCandidate({ cargoArgs, cwd, realLock, baselineMetadata, tempRoot }) {
+export function prepareCandidate({ cargoArgs, cwd, realLock, baselineMetadata, tempRoot }) {
   const dryArgs = cargoArgs.filter((argument) => argument !== '--dry' && argument !== '--dry-run');
   if (cargoSupportsTemporaryLockfile()) {
     const candidateLock = path.join(tempRoot, 'Cargo.lock');
@@ -297,7 +297,7 @@ function formatAge(ageMs) {
   return `${sign}${hours}h ${Math.floor(remaining / (60 * 1000))}m`;
 }
 
-export async function validateCandidate(baseline, candidate, overrides) {
+export async function validateCandidate(baseline, candidate, overrides, now = nowTimestamp()) {
   const baselineKeys = new Set(baseline.map(packageKey));
   const baselineByName = new Map();
   for (const pkg of baseline) {
@@ -308,7 +308,6 @@ export async function validateCandidate(baseline, candidate, overrides) {
   const newlySelected = candidate.filter((pkg) => !baselineKeys.has(packageKey(pkg)));
   const violations = [];
   const approved = [];
-  const now = nowTimestamp();
   for (const pkg of newlySelected) {
     const kind = sourceKind(pkg.source);
     if (kind === 'path') continue;
@@ -373,7 +372,7 @@ export async function validateCandidate(baseline, candidate, overrides) {
   return { newlySelected, approved };
 }
 
-function installValidatedLock(candidateLock, realLock, cargoArgs, cwd) {
+export function installValidatedLock(candidateLock, realLock, cargoArgs, cwd) {
   const existed = existsSync(realLock);
   const previous = existed ? readFileSync(realLock) : null;
   copyFileSync(candidateLock, realLock);
@@ -388,7 +387,7 @@ function installValidatedLock(candidateLock, realLock, cargoArgs, cwd) {
   }
 }
 
-function restoreRealLock(realLock, previous) {
+export function restoreRealLock(realLock, previous) {
   if (!realLock || !previous) return;
   const current = existsSync(realLock) ? readFileSync(realLock) : null;
   if (!current || !current.equals(previous)) writeFileSync(realLock, previous);
