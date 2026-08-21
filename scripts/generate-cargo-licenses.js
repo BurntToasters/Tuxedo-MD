@@ -7,7 +7,7 @@ fs.mkdirSync(path.join(root, 'public'), { recursive: true });
 const metadata = JSON.parse(
   execFileSync(
     'cargo',
-    ['metadata', '--format-version', '1', '--manifest-path', 'src-tauri/Cargo.toml'],
+    ['metadata', '--format-version', '1', '--manifest-path', 'src-tauri/Cargo.toml', '--locked'],
     {
       cwd: root,
       encoding: 'utf8',
