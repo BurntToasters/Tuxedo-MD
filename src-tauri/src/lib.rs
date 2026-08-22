@@ -1443,20 +1443,20 @@ fn allow_webview_navigation(url: &Url) -> bool {
 }
 
 fn setup_window_chrome(app: &tauri::App) -> tauri::Result<()> {
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(_window) = app.get_webview_window("main") else {
         return Ok(());
     };
 
     #[cfg(target_os = "windows")]
     {
-        window.set_decorations(false)?;
+        _window.set_decorations(false)?;
     }
 
     // Skip overlay chrome for MAS builds (`--features mas`).
     #[cfg(all(target_os = "macos", not(feature = "mas")))]
     {
         use tauri::TitleBarStyle;
-        window.set_title_bar_style(TitleBarStyle::Overlay)?;
+        _window.set_title_bar_style(TitleBarStyle::Overlay)?;
     }
 
     Ok(())
