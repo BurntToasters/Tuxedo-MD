@@ -9,6 +9,7 @@ permissions:
   contents: read
 
 env:
+  NODE_VERSION: '22.22.2'
   NPM_VERSION: '12.0.2'
   RUST_VERSION: '1.97.1'
 
@@ -22,7 +23,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - name: Pin npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts
@@ -48,7 +49,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version: ${{ env.NODE_VERSION }}
           cache: npm
       - name: Pin npm
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts

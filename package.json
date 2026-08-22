@@ -12,7 +12,7 @@
     "url": "git+https://github.com/BurntToasters/Tuxedo-MD.git"
   },
   "engines": {
-    "node": ">=22.13",
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0",
     "npm": ">=12.0.1"
   },
   "scripts": {
