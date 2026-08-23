@@ -942,9 +942,7 @@ async function getOrCreateRelease() {
 async function uploadAssetOnce(uploadUrl, filePath) {
   const uploaded = uploadReleaseAsset(uploadUrl, filePath);
   if (!uploaded || typeof uploaded.id !== 'number') {
-    throw new Error(
-      `Upload ${path.basename(filePath)} succeeded but GitHub returned no asset id.`
-    );
+    throw new Error(`Upload ${path.basename(filePath)} succeeded but GitHub returned no asset id.`);
   }
   return uploaded;
 }

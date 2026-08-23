@@ -27,7 +27,9 @@ function releaseAssetUploadArgs(uploadUrl, filePath) {
     throw new Error(`Refusing unexpected GitHub upload URL: ${uploadUrl}`);
   }
   url.searchParams.set('name', path.basename(filePath));
-  const contentType = /\.(asc|txt|json)$/i.test(filePath) ? 'text/plain' : 'application/octet-stream';
+  const contentType = /\.(asc|txt|json)$/i.test(filePath)
+    ? 'text/plain'
+    : 'application/octet-stream';
   return [
     'api',
     '--method',
@@ -52,13 +54,17 @@ function runGitHub(args, { input } = {}) {
   });
   if (result.error) {
     if (result.error.code === 'ENOENT') {
-      throw new Error('GitHub CLI is required. Install gh and run `gh auth login` on this release VM.');
+      throw new Error(
+        'GitHub CLI is required. Install gh and run `gh auth login` on this release VM.'
+      );
     }
     throw result.error;
   }
   if (result.status !== 0) {
     const detail = [result.stderr, result.stdout].filter(Boolean).join('\n').trim();
-    const error = new Error(`gh ${args.join(' ')} failed with status ${result.status}${detail ? `:\n${detail}` : ''}`);
+    const error = new Error(
+      `gh ${args.join(' ')} failed with status ${result.status}${detail ? `:\n${detail}` : ''}`
+    );
     error.statusCode = githubStatusCode(detail);
     throw error;
   }
