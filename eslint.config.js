@@ -34,7 +34,6 @@ export default tseslint.config(
       'scripts/updater-signature-verifier.js',
       'scripts/validate-updater-manifest.js',
       'scripts/validate-updater-live.js',
-      'scripts/updater-live-helpers.js',
     ],
     rules: {
       'no-empty': 'off',

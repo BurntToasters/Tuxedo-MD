@@ -95,7 +95,7 @@ The `package.json` command vocabulary intentionally mirrors IYERIS where it appl
 - Stores: `build:msstore`, `build:mac:appstore`.
 - Release: `release:prepare`, `release:draft`, `release:win`, `release:mac`, `release:linux`, GPG signing, and final asset upload.
 
-The environment names likewise follow IYERIS: `GH_TOKEN`, GPG variables, Tauri updater signing variables, Apple signing/notarization variables, and the optional GitHub repository override. See `.env.example`; `.env` must never be committed.
+The environment names likewise follow IYERIS: GPG variables, Tauri updater signing variables, Apple signing/notarization variables, and the optional GitHub repository override. GitHub releases use the credential store configured by `gh auth login`. See `.env.example`; `.env` must never be committed.
 
 Important current distribution details:
 

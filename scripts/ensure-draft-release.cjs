@@ -1,5 +1,6 @@
 const { execFileSync } = require('node:child_process');
 const { readFileSync } = require('node:fs');
+const { assertGitHubCliAuthenticated, runGitHub } = require('./github-cli.cjs');
 
 const path = require('node:path');
 const pkg = JSON.parse(readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
@@ -7,16 +8,16 @@ const tag = `v${pkg.version}`;
 const owner = process.env.GH_REPO_OWNER || 'BurntToasters';
 const repo = process.env.GH_REPO_NAME || 'Tuxedo-MD';
 const fullRepo = `${owner}/${repo}`;
-const gh = process.platform === 'win32' ? 'gh.exe' : 'gh';
-const run = (args, stdio = 'pipe') => execFileSync(gh, args, { stdio, encoding: 'utf8' });
+const run = (args) => runGitHub(args).stdout;
 
 function draftStatus() {
   try {
     const raw = run(['release', 'view', tag, '--repo', fullRepo, '--json', 'isDraft,tagName']);
     const release = JSON.parse(raw);
     return release?.isDraft === true ? 'draft' : 'published';
-  } catch {
-    return 'missing';
+  } catch (error) {
+    if (/release not found|HTTP 404/i.test(error?.message || '')) return 'missing';
+    throw error;
   }
 }
 
@@ -45,9 +46,10 @@ function ensureDraft() {
     target,
   ];
   if (pkg.version.includes('-')) args.push('--prerelease');
-  run(args, 'inherit');
+  run(args);
 }
 
+assertGitHubCliAuthenticated();
 if (process.argv.includes('--wait')) {
   let attempts = 0;
   let status = draftStatus();
