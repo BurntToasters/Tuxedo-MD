@@ -66,6 +66,23 @@ export function getAfterPackLocation(env = process.env) {
   return value.trim();
 }
 
+export function isBetaReleaseVersion(version) {
+  const numeric = '(?:0|[1-9]\\d*)';
+  return new RegExp(`^${numeric}\\.${numeric}\\.${numeric}-beta\\.${numeric}$`).test(
+    String(version ?? '')
+  );
+}
+
+export function readPackageVersion(repositoryRoot = path.join(__dirname, '..')) {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
+  return typeof packageJson.version === 'string' ? packageJson.version : '';
+}
+
+export function shouldSkipBetaMirror(env = process.env, version) {
+  if (!isBetaReleaseVersion(version)) return false;
+  return String(env.OVERRIDE_BETA_MIRROR_SKIP ?? '').trim() !== '1';
+}
+
 export function pathsEqual(left, right, platform = process.platform) {
   const resolvedLeft = path.resolve(left);
   const resolvedRight = path.resolve(right);
@@ -205,11 +222,22 @@ export function copyReleaseAssets(
   return entries.length;
 }
 
-function run({ releaseDir = RELEASE_DIR, env = process.env, logger = console } = {}) {
+function run({
+  releaseDir = RELEASE_DIR,
+  env = process.env,
+  logger = console,
+  version = readPackageVersion(),
+} = {}) {
+  if (shouldSkipBetaMirror(env, version)) {
+    logger.log(
+      `beta version ${version}; skipping AFTER_PACK_LOC mirror (set OVERRIDE_BETA_MIRROR_SKIP=1 to force).`
+    );
+    return { mirrored: false, destination: '', copiedEntries: 0, skippedBetaMirror: true };
+  }
   const destination = getAfterPackLocation(env);
   if (!destination) {
     logger.log('AFTER_PACK_LOC not set; skipping release mirror.');
-    return { mirrored: false, destination: '', copiedEntries: 0 };
+    return { mirrored: false, destination: '', copiedEntries: 0, skippedBetaMirror: false };
   }
 
   progress(logger, 'cleaning build-only release artifacts');
@@ -221,6 +249,7 @@ function run({ releaseDir = RELEASE_DIR, env = process.env, logger = console } =
     mirrored: true,
     destination: path.resolve(destination),
     copiedEntries,
+    skippedBetaMirror: false,
   };
 }
 
@@ -228,8 +257,9 @@ export function finalizeReleaseAssets({
   releaseDir = RELEASE_DIR,
   env = process.env,
   logger = console,
+  version = readPackageVersion(),
 } = {}) {
-  const result = run({ releaseDir, env, logger });
+  const result = run({ releaseDir, env, logger, version });
   if (result.mirrored) {
     logger.log(
       `Mirrored and verified ${result.copiedEntries} cleaned release entries to: ${result.destination}`
