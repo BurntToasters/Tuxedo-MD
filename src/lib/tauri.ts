@@ -118,11 +118,15 @@ export async function probeDocumentMeta(
   return invoke('probe_document_meta', { path });
 }
 
-export async function loadState<T>(key: string): Promise<T | null> {
+export async function loadState<T>(
+  key: string,
+  validate?: (raw: unknown) => T | null
+): Promise<T | null> {
   const content = await invoke<string | null>('load_app_state', { key });
   if (!content) return null;
   try {
-    return JSON.parse(content) as T;
+    const parsed: unknown = JSON.parse(content);
+    return validate ? validate(parsed) : (parsed as T);
   } catch {
     // Corrupt state must not abort restore and wipe a good session.
     return null;

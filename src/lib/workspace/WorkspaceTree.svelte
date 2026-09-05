@@ -132,6 +132,7 @@
           {#if row.kind === 'file'}
             <button
               type="button"
+              tabindex="-1"
               title={`Rename ${row.name}`}
               aria-label={`Rename ${row.name}`}
               onclick={(event) => {
@@ -141,6 +142,7 @@
             >
             <button
               type="button"
+              tabindex="-1"
               title={`Delete ${row.name}`}
               aria-label={`Delete ${row.name}`}
               onclick={(event) => {
@@ -151,6 +153,7 @@
           {:else}
             <button
               type="button"
+              tabindex="-1"
               title={`New document in ${row.name}`}
               aria-label={`New document in ${row.name}`}
               onclick={(event) => {

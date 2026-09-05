@@ -40,6 +40,11 @@ function getChecks(npmCmd = npm) {
       'cargo',
       ['check', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--features', 'mas'],
     ],
+    [
+      'Rust tests',
+      'cargo',
+      ['test', '--locked', '--manifest-path', 'src-tauri/Cargo.toml', '--all-targets'],
+    ],
     ['Edition gate tests', npmCmd, ['run', 'test:edition']],
   ];
 }

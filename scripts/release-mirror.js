@@ -74,7 +74,9 @@ export function isBetaReleaseVersion(version) {
 }
 
 export function readPackageVersion(repositoryRoot = path.join(__dirname, '..')) {
-  const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
+  const packageJson = JSON.parse(
+    fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8')
+  );
   return typeof packageJson.version === 'string' ? packageJson.version : '';
 }
 

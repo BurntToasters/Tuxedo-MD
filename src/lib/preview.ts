@@ -1,3 +1,4 @@
+import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import rehypeStringify from 'rehype-stringify';
 import remarkGfm from 'remark-gfm';
@@ -7,6 +8,7 @@ import { unified } from 'unified';
 
 const schema = {
   ...defaultSchema,
+  strip: [...(defaultSchema.strip ?? ['script']), 'style'],
   protocols: {
     ...defaultSchema.protocols,
     // Keep preview links aligned with the opener allowlist; drop http/irc/xmpp/etc.
@@ -20,7 +22,8 @@ const schema = {
 const processor = unified()
   .use(remarkParse)
   .use(remarkGfm)
-  .use(remarkRehype)
+  .use(remarkRehype, { allowDangerousHtml: true })
+  .use(rehypeRaw)
   .use(rehypeSanitize, schema)
   .use(rehypeStringify);
 

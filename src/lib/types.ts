@@ -1,3 +1,6 @@
+export const APP_VERSION = '0.1.0-alpha.1';
+export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024;
+
 export type Edition = 'community' | 'full';
 
 export type EditionCapability =

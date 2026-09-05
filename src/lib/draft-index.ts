@@ -1,7 +1,7 @@
 import { normalizeDraftIndex } from './session';
 
 type DraftIndexStore = {
-  loadState: <T>(key: string) => Promise<T | null>;
+  loadState: <T>(key: string, validate?: (raw: unknown) => T | null) => Promise<T | null>;
   saveState: (key: string, value: unknown) => Promise<void>;
 };
 
@@ -15,7 +15,7 @@ export async function setDraftIndexed(
   { loadState, saveState }: DraftIndexStore
 ): Promise<void> {
   const run = async () => {
-    const index = normalizeDraftIndex((await loadState<string[]>('draft-index')) ?? []);
+    const index = (await loadState('draft-index', normalizeDraftIndex)) ?? [];
     const has = index.includes(id);
     if (keep && !has) await saveState('draft-index', [...index, id]);
     if (!keep && has)

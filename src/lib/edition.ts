@@ -84,16 +84,17 @@ const capabilityNames = Object.keys(capabilityRegistry) as EditionCapability[];
 export const requestedEdition: Edition =
   import.meta.env.VITE_TUXEDO_EDITION === 'full' ? 'full' : 'community';
 
-export let edition: Edition = requestedEdition;
-export let isFullEdition = edition === 'full';
-export let editionLabel = isFullEdition ? 'Pro' : 'Community';
-export let editionVersion: string | null = null;
-export let editionWarning: string | null = null;
-export let opaqueWindow = false;
+export interface EditionSnapshot {
+  readonly edition: Edition;
+  readonly isFullEdition: boolean;
+  readonly editionLabel: string;
+  readonly editionVersion: string | null;
+  readonly editionWarning: string | null;
+  readonly opaqueWindow: boolean;
+  readonly enabledCapabilities: ReadonlySet<EditionCapability>;
+}
 
-let enabledCapabilities = new Set<EditionCapability>(capabilitiesForEdition(requestedEdition));
-
-function capabilitiesForEdition(value: Edition): EditionCapability[] {
+export function capabilitiesForEdition(value: Edition): EditionCapability[] {
   return value === 'full' ? [...shippedCapabilities] : [];
 }
 
@@ -101,7 +102,10 @@ function isEditionCapability(value: unknown): value is EditionCapability {
   return typeof value === 'string' && capabilityNames.includes(value as EditionCapability);
 }
 
-function applyBuildInfo(info: BuildInfo): void {
+export function resolveBuildInfo(
+  info: BuildInfo,
+  requested: Edition = requestedEdition
+): EditionSnapshot {
   const reportedEdition: Edition = info.edition === 'full' ? 'full' : 'community';
   const reportedCapabilities = new Set(
     Array.isArray(info.capabilities) ? info.capabilities.filter(isEditionCapability) : []
@@ -121,38 +125,112 @@ function applyBuildInfo(info: BuildInfo): void {
   if (info.edition !== 'community' && info.edition !== 'full') {
     warnings.push('The native build reported an unknown edition.');
   }
-  if (requestedEdition !== reportedEdition) {
+  if (requested !== reportedEdition) {
     warnings.push(
-      `The frontend requested ${requestedEdition === 'full' ? 'Pro' : 'Community'}, but the native build reports ${reportedEdition === 'full' ? 'Pro' : 'Community'}.`
+      `The frontend requested ${requested === 'full' ? 'Pro' : 'Community'}, but the native build reports ${reportedEdition === 'full' ? 'Pro' : 'Community'}.`
     );
   }
   if (missingCapabilities.length || unexpectedCapabilities.length) {
     warnings.push('The native capability contract does not match this frontend build.');
   }
 
-  edition = reportedEdition;
-  isFullEdition = edition === 'full';
-  editionLabel = isFullEdition ? 'Pro' : 'Community';
-  editionVersion = typeof info.version === 'string' ? info.version : null;
-  opaqueWindow = Boolean(info.opaqueWindow);
-  enabledCapabilities = effectiveCapabilities;
-  editionWarning = warnings.length
-    ? `${warnings.join(' ')} Native ${editionLabel} permissions are in force.`
+  const isFull = reportedEdition === 'full';
+  const label = isFull ? 'Pro' : 'Community';
+  const warning = warnings.length
+    ? `${warnings.join(' ')} Native ${label} permissions are in force.`
     : null;
 
-  if (editionWarning) console.error(`[Tuxedo MD] ${editionWarning}`);
+  return {
+    edition: reportedEdition,
+    isFullEdition: isFull,
+    editionLabel: label,
+    editionVersion: typeof info.version === 'string' ? info.version : null,
+    opaqueWindow: Boolean(info.opaqueWindow),
+    enabledCapabilities: effectiveCapabilities,
+    editionWarning: warning,
+  };
 }
 
-function applySafeFallback(error: unknown): void {
-  edition = 'community';
-  isFullEdition = false;
-  editionLabel = 'Community';
-  editionVersion = null;
-  opaqueWindow = false;
-  enabledCapabilities = new Set();
+export function resolveSafeFallback(error: unknown): EditionSnapshot {
   const reason = error instanceof Error ? error.message : String(error);
-  editionWarning = `Native build information could not be verified. Community safeguards are in force. ${reason}`;
-  console.error(`[Tuxedo MD] ${editionWarning}`);
+  return {
+    edition: 'community',
+    isFullEdition: false,
+    editionLabel: 'Community',
+    editionVersion: null,
+    opaqueWindow: false,
+    enabledCapabilities: new Set(),
+    editionWarning: `Native build information could not be verified. Community safeguards are in force. ${reason}`,
+  };
+}
+
+let activeState: EditionSnapshot = {
+  edition: requestedEdition,
+  isFullEdition: requestedEdition === 'full',
+  editionLabel: requestedEdition === 'full' ? 'Pro' : 'Community',
+  editionVersion: null,
+  editionWarning: null,
+  opaqueWindow: false,
+  enabledCapabilities: new Set(capabilitiesForEdition(requestedEdition)),
+};
+
+export const editionState = {
+  get edition(): Edition {
+    return activeState.edition;
+  },
+  get isFullEdition(): boolean {
+    return activeState.isFullEdition;
+  },
+  get editionLabel(): string {
+    return activeState.editionLabel;
+  },
+  get editionVersion(): string | null {
+    return activeState.editionVersion;
+  },
+  get editionWarning(): string | null {
+    return activeState.editionWarning;
+  },
+  get opaqueWindow(): boolean {
+    return activeState.opaqueWindow;
+  },
+};
+
+export function getEdition(): Edition {
+  return activeState.edition;
+}
+
+export function isFullEdition(): boolean {
+  return activeState.isFullEdition;
+}
+
+export function getEditionLabel(): string {
+  return activeState.editionLabel;
+}
+
+export function getEditionVersion(): string | null {
+  return activeState.editionVersion;
+}
+
+export function getEditionWarning(): string | null {
+  return activeState.editionWarning;
+}
+
+export function isOpaqueWindow(): boolean {
+  return activeState.opaqueWindow;
+}
+
+export function getEditionSnapshot(): EditionSnapshot {
+  return activeState;
+}
+
+export function applyBuildInfo(info: BuildInfo): void {
+  activeState = resolveBuildInfo(info, requestedEdition);
+  if (activeState.editionWarning) console.error(`[Tuxedo MD] ${activeState.editionWarning}`);
+}
+
+export function applySafeFallback(error: unknown): void {
+  activeState = resolveSafeFallback(error);
+  console.error(`[Tuxedo MD] ${activeState.editionWarning}`);
 }
 
 export async function initializeEdition(): Promise<void> {
@@ -165,13 +243,13 @@ export async function initializeEdition(): Promise<void> {
 }
 
 export function hasCapability(capability: EditionCapability): boolean {
-  return enabledCapabilities.has(capability);
+  return activeState.enabledCapabilities.has(capability);
 }
 
 export function capabilityMessage(capability: EditionCapability): string {
   const definition = capabilityRegistry[capability];
   if (hasCapability(capability)) {
-    return `${definition.label} is enabled in Tuxedo MD ${editionLabel}.`;
+    return `${definition.label} is enabled in Tuxedo MD ${activeState.editionLabel}.`;
   }
   if (!definition.shipped) {
     return `${definition.label} is planned for a future Tuxedo MD Pro release. ${definition.description}`;
@@ -183,6 +261,3 @@ export async function requireCapability(capability: EditionCapability): Promise<
   if (!hasCapability(capability)) throw new Error(capabilityMessage(capability));
   if (isDesktop()) await authorizeCapability(capability);
 }
-
-/** Test helpers — keep production imports on the public API above. */
-export const __test__ = { applyBuildInfo, applySafeFallback, capabilitiesForEdition };

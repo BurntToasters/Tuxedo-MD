@@ -2951,3 +2951,55 @@ body {
     scrollbar-color: ButtonText Canvas;
   }
 }
+
+.fatal-error-banner {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 10, 15, 0.88);
+  backdrop-filter: blur(20px);
+  padding: 24px;
+}
+.fatal-error-card {
+  max-width: 480px;
+  width: 100%;
+  background: #141721;
+  border: 1px solid #f85149;
+  border-radius: 8px;
+  padding: 24px;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4);
+  color: #e9edf5;
+}
+.fatal-error-card h2 {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #f85149;
+}
+.fatal-error-message {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #8b949e;
+  word-break: break-word;
+}
+.fatal-error-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.fatal-error-actions button {
+  background: #238636;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.fatal-error-actions button:hover {
+  background: #2ea043;
+}

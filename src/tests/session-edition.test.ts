@@ -1,8 +1,10 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import {
   hydrateSessionTabs,
+  isPathUnderWorkspace,
   normalizeDocumentTab,
   normalizeDraftIndex,
+  normalizeFilePath,
   normalizeSessionState,
   pathsReferToSameFile,
   slimSessionTabs,
@@ -61,6 +63,38 @@ describe('session normalization', () => {
     expect(pathsReferToSameFile('C:/a.md', 'C:/b.md')).toBe(false);
   });
 
+  it('normalizes file paths with normalizeFilePath across platforms and URIs', () => {
+    expect(normalizeFilePath('C:\\Users\\Dev\\Notes\\')).toBe('c:/users/dev/notes');
+    expect(normalizeFilePath('\\\\?\\C:\\My Docs\\Notes.md')).toBe('c:/my docs/notes.md');
+    expect(normalizeFilePath('file:///C:/Notes/My%20Doc.md')).toBe('c:/notes/my doc.md');
+    expect(normalizeFilePath('file:///Notes/%E0%A4%A')).toBeDefined();
+
+    const originalUa = navigator.userAgent;
+    try {
+      Object.defineProperty(navigator, 'userAgent', {
+        value: 'Mozilla/5.0 (X11; Linux x86_64)',
+        configurable: true,
+      });
+      expect(normalizeFilePath('/home/user/MyNotes/Readme.MD')).toBe(
+        '/home/user/MyNotes/Readme.MD'
+      );
+      expect(normalizeFilePath('/home/user/Notes/')).toBe('/home/user/Notes');
+
+      Object.defineProperty(navigator, 'userAgent', {
+        value: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+        configurable: true,
+      });
+      expect(normalizeFilePath('/Users/Dev/MyNotes/Readme.MD')).toBe(
+        '/users/dev/mynotes/readme.md'
+      );
+    } finally {
+      Object.defineProperty(navigator, 'userAgent', {
+        value: originalUa,
+        configurable: true,
+      });
+    }
+  });
+
   it('compares UNC and file:// path forms', () => {
     expect(pathsReferToSameFile('\\\\?\\UNC\\server\\share\\a.md', '//server/share/a.md')).toBe(
       true
@@ -69,6 +103,7 @@ describe('session normalization', () => {
     expect(pathsReferToSameFile('\\\\server\\share\\a.md', '//server/share/a.md')).toBe(true);
     expect(pathsReferToSameFile('file:///C:/Notes/a.md', 'C:/Notes/a.md')).toBe(true);
     expect(pathsReferToSameFile('file://C:/Notes/a.md', 'c:/Notes/a.md')).toBe(true);
+    expect(pathsReferToSameFile('file:///C:/My%20Notes/a%20b.md', 'C:/My Notes/a b.md')).toBe(true);
     expect(pathsReferToSameFile('//server/share/a.md', '//server/share/b.md')).toBe(false);
   });
 
@@ -128,6 +163,28 @@ describe('session normalization', () => {
         selection: { anchor: 0, head: 0 },
       },
       {
+        id: 'untitled',
+        name: 'Untitled.md',
+        path: null,
+        content: '# Draft',
+        savedContent: '',
+        fingerprint: null,
+        conflict: false,
+        recovered: false,
+        selection: { anchor: 0, head: 0 },
+      },
+      {
+        id: 'dirty',
+        name: 'dirty.md',
+        path: 'C:/dirty.md',
+        content: '# modified',
+        savedContent: '# original',
+        fingerprint: null,
+        conflict: false,
+        recovered: false,
+        selection: { anchor: 0, head: 0 },
+      },
+      {
         id: 'missing',
         name: 'gone.md',
         path: 'C:/gone.md',
@@ -151,8 +208,18 @@ describe('session normalization', () => {
     const hydrated = await hydrateSessionTabs(tabs, readDocument);
     expect(hydrated[0].content).toBe('# restored');
     expect(hydrated[0].savedContent).toBe('# restored');
-    expect(hydrated[1].recovered).toBe(true);
-    expect(hydrated[1].content).toBe('');
+    expect(hydrated[1].content).toBe('# Draft');
+    expect(hydrated[2].content).toBe('# modified');
+    expect(hydrated[3].recovered).toBe(true);
+    expect(hydrated[3].content).toBe('');
+  });
+
+  it('determines if paths reside under a workspace root', () => {
+    expect(isPathUnderWorkspace('/workspace/docs/guide.md', '/workspace')).toBe(true);
+    expect(isPathUnderWorkspace('/other/path/guide.md', '/workspace')).toBe(false);
+    expect(isPathUnderWorkspace(null, '/workspace')).toBe(false);
+    expect(isPathUnderWorkspace('/workspace/docs/guide.md', null)).toBe(false);
+    expect(isPathUnderWorkspace('C:\\workspace\\notes\\a.md', 'c:/workspace')).toBe(true);
   });
 });
 
@@ -163,7 +230,7 @@ describe('edition applyBuildInfo', () => {
 
   it('enables only shipped capabilities for full builds', async () => {
     const edition = await import('../lib/edition');
-    edition.__test__.applyBuildInfo({
+    edition.applyBuildInfo({
       edition: 'full',
       version: '0.1.0-alpha.1',
       capabilities: [
@@ -178,14 +245,16 @@ describe('edition applyBuildInfo', () => {
     });
     expect(edition.hasCapability('workspaceSearch')).toBe(true);
     expect(edition.hasCapability('mermaid')).toBe(false);
-    expect(edition.opaqueWindow).toBe(true);
+    expect(edition.editionState.opaqueWindow).toBe(true);
+    expect(edition.isOpaqueWindow()).toBe(true);
   });
 
   it('falls back to community with empty capabilities', async () => {
     const edition = await import('../lib/edition');
-    edition.__test__.applySafeFallback(new Error('offline'));
-    expect(edition.isFullEdition).toBe(false);
+    edition.applySafeFallback(new Error('offline'));
+    expect(edition.isFullEdition()).toBe(false);
+    expect(edition.editionState.isFullEdition).toBe(false);
     expect(edition.hasCapability('workspaceSearch')).toBe(false);
-    expect(edition.opaqueWindow).toBe(false);
+    expect(edition.editionState.opaqueWindow).toBe(false);
   });
 });

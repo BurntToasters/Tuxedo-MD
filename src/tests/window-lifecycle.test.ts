@@ -82,6 +82,16 @@ describe('requestAppClose', () => {
     await mod.requestAppClose();
     expect(destroy).toHaveBeenCalledTimes(2);
   });
+
+  it('resets phase when beforeClose times out', async () => {
+    const hangingBeforeClose = vi.fn(() => new Promise<void>(() => {}));
+    const mod = await import('../lib/window-lifecycle');
+    await mod.requestAppClose(hangingBeforeClose, 10);
+    expect(hangingBeforeClose).toHaveBeenCalledOnce();
+    expect(mod.isAppClosing()).toBe(false);
+    expect(mod.shouldInterceptNativeClose()).toBe(true);
+    expect(destroy).not.toHaveBeenCalled();
+  });
 });
 
 describe('askDirtyTabClose', () => {

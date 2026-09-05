@@ -33,8 +33,7 @@
     return () => unlisten?.();
   });
 
-  function minimize(event: PointerEvent) {
-    if (event.button !== 0) return;
+  function minimize(event: Event) {
     stopChromeCapture(event);
     event.preventDefault();
     void getCurrentWindow()
@@ -42,8 +41,7 @@
       .catch((error) => console.error('minimize failed', error));
   }
 
-  function toggleMaximize(event: PointerEvent) {
-    if (event.button !== 0) return;
+  function toggleMaximize(event: Event) {
     stopChromeCapture(event);
     event.preventDefault();
     void getCurrentWindow()
@@ -52,8 +50,7 @@
       .catch((error) => console.error('toggleMaximize failed', error));
   }
 
-  function close(event: PointerEvent) {
-    if (event.button !== 0) return;
+  function close(event: Event) {
     stopChromeCapture(event);
     event.preventDefault();
     onclose();
@@ -73,7 +70,8 @@
     title="Minimize"
     aria-label="Minimize"
     data-tauri-no-drag
-    onpointerdown={minimize}
+    onpointerdown={stopChromeCapture}
+    onclick={minimize}
   >
     <Minus size={11} strokeWidth={2.25} />
   </button>
@@ -83,7 +81,8 @@
     title={maximized ? 'Restore' : 'Maximize'}
     aria-label={maximized ? 'Restore' : 'Maximize'}
     data-tauri-no-drag
-    onpointerdown={toggleMaximize}
+    onpointerdown={stopChromeCapture}
+    onclick={toggleMaximize}
   >
     {#if maximized}
       <Minimize2 size={10} strokeWidth={2.25} />
@@ -97,7 +96,8 @@
     title="Close"
     aria-label="Close"
     data-tauri-no-drag
-    onpointerdown={close}
+    onpointerdown={stopChromeCapture}
+    onclick={close}
   >
     <X size={11} strokeWidth={2.25} />
   </button>

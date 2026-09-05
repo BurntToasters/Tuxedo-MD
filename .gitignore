@@ -10,6 +10,8 @@ flatpak-repo/
 flatpak-build*/
 .env
 .DS_Store
+**/.DS_Store
+*.DS_Store
 src-tauri/target/
 src-tauri/gen/
 src-tauri/embedded.provisionprofile

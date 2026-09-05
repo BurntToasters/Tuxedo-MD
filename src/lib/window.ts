@@ -2,8 +2,18 @@ import { isDesktop } from './tauri';
 
 export type WindowEffectState = 'native' | 'css' | 'opaque';
 
+let cachedReducedTransparency: boolean | null = null;
+
 function reducedTransparency(): boolean {
-  return window.matchMedia?.('(prefers-reduced-transparency: reduce)').matches ?? false;
+  if (typeof window === 'undefined' || !window.matchMedia) return false;
+  if (cachedReducedTransparency === null) {
+    const query = window.matchMedia('(prefers-reduced-transparency: reduce)');
+    cachedReducedTransparency = query.matches;
+    query.addEventListener?.('change', (event) => {
+      cachedReducedTransparency = event.matches;
+    });
+  }
+  return cachedReducedTransparency;
 }
 
 const DRAWER_WIDTH = 240;

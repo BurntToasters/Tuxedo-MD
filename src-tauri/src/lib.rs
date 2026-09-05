@@ -44,9 +44,6 @@ enum AppError {
     WorkspaceNotAdopted,
     #[error("That document path is not available")]
     PathNotConsented,
-    #[allow(dead_code)]
-    #[error("A different workspace folder is already open")]
-    WorkspaceMismatch,
     #[error("Only Markdown documents can be created, renamed, or deleted here")]
     NotMarkdown,
     #[error("A file with that name already exists")]
@@ -328,6 +325,7 @@ fn read_document(path: &Path) -> Result<FileDocument, AppError> {
     // Canonicalize so Open dialog paths match workspace-scan paths (one tab per file).
     let canonical = fs::canonicalize(path)?;
     let content = fs::read_to_string(&canonical)?;
+    let fingerprint = fingerprint_from_bytes(&metadata, content.as_bytes())?;
     Ok(FileDocument {
         name: canonical
             .file_name()
@@ -336,7 +334,7 @@ fn read_document(path: &Path) -> Result<FileDocument, AppError> {
             .to_owned(),
         path: canonical.to_string_lossy().into_owned(),
         content,
-        fingerprint: fingerprint(&canonical, &metadata)?,
+        fingerprint,
     })
 }
 
@@ -356,6 +354,22 @@ fn fingerprint(path: &Path, metadata: &fs::Metadata) -> Result<DocumentFingerpri
         modified_ms,
         size: metadata.len(),
         hash: blake3::hash(&fs::read(path)?).to_hex().to_string(),
+    })
+}
+
+fn fingerprint_from_bytes(
+    metadata: &fs::Metadata,
+    bytes: &[u8],
+) -> Result<DocumentFingerprint, AppError> {
+    let modified_ms = metadata
+        .modified()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    Ok(DocumentFingerprint {
+        modified_ms,
+        size: metadata.len(),
+        hash: blake3::hash(bytes).to_hex().to_string(),
     })
 }
 
@@ -382,7 +396,7 @@ fn save_document(
 ) -> Result<DocumentFingerprint, AppError> {
     // Parent must already exist so new Save As targets can be canonicalized.
     let path = allow_document_access(&app, &path)?;
-    if content.len() as u64 > MAX_DOCUMENT_BYTES {
+    if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_DOCUMENT_BYTES {
         return Err(AppError::FileTooLarge);
     }
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -417,7 +431,7 @@ fn save_document(
     result.map_err(AppError::from)?;
     consent_path(&app, &path)?;
     let metadata = fs::metadata(&path)?;
-    fingerprint(&path, &metadata)
+    fingerprint_from_bytes(&metadata, content.as_bytes())
 }
 
 #[tauri::command]
@@ -516,12 +530,17 @@ fn delete_app_state(app: AppHandle, key: String) -> Result<(), AppError> {
     }
 }
 
+static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn write_replacement(path: &Path, content: &[u8]) -> Result<(), AppError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
+    let count = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temporary = parent.join(format!(
-        ".{}.tmp",
-        path.file_name().unwrap_or_default().to_string_lossy()
+        ".{}.{}-{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        count
     ));
     let result = (|| -> Result<(), std::io::Error> {
         let mut file = fs::File::create(&temporary)?;
@@ -575,6 +594,7 @@ fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
 }
 
 /// `root` must already be canonical. Returns true when `path` canonicalizes under it.
+#[cfg(test)]
 fn path_confined_to_root(root: &Path, path: &Path) -> bool {
     match fs::canonicalize(path) {
         Ok(canonical) => canonical.starts_with(root),
@@ -601,12 +621,12 @@ fn walk_markdown_files(root: &Path) -> Result<Vec<PathBuf>, AppError> {
         if !entry.file_type().is_file() || !is_markdown(entry.path()) {
             continue;
         }
-        if !path_confined_to_root(root, entry.path()) {
-            continue;
-        }
         let Ok(canonical) = fs::canonicalize(entry.path()) else {
             continue;
         };
+        if !canonical.starts_with(root) {
+            continue;
+        }
         if files.len() >= MAX_WORKSPACE_FILES {
             return Err(AppError::WorkspaceTooLarge);
         }
@@ -661,19 +681,23 @@ fn adopt_workspace_folder(app: AppHandle, root: PathBuf) -> Result<String, AppEr
 }
 
 #[tauri::command]
-fn scan_workspace(app: AppHandle, root: PathBuf) -> Result<Vec<WorkspaceEntry>, AppError> {
+async fn scan_workspace(app: AppHandle, root: PathBuf) -> Result<Vec<WorkspaceEntry>, AppError> {
     let canonical_root = require_adopted_workspace(&app, &root)?;
-    let paths = walk_markdown_files(&canonical_root)?;
-    let mut files: Vec<WorkspaceEntry> = paths
-        .iter()
-        .map(|path| workspace_entry(&canonical_root, path))
-        .collect();
-    files.sort_by(|a, b| {
-        a.relative_path
-            .to_lowercase()
-            .cmp(&b.relative_path.to_lowercase())
-    });
-    Ok(files)
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = walk_markdown_files(&canonical_root)?;
+        let mut files: Vec<WorkspaceEntry> = paths
+            .iter()
+            .map(|path| workspace_entry(&canonical_root, path))
+            .collect();
+        files.sort_by(|a, b| {
+            a.relative_path
+                .to_lowercase()
+                .cmp(&b.relative_path.to_lowercase())
+        });
+        Ok(files)
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
 }
 
 fn preview_line(line: &str) -> String {
@@ -686,8 +710,26 @@ fn preview_line(line: &str) -> String {
     preview
 }
 
+fn line_contains_query(line: &str, needle: &str, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        line.contains(needle)
+    } else if line.is_ascii() && needle.is_ascii() {
+        let n_bytes = needle.as_bytes();
+        let l_bytes = line.as_bytes();
+        if n_bytes.len() > l_bytes.len() {
+            false
+        } else {
+            l_bytes
+                .windows(n_bytes.len())
+                .any(|window| window.eq_ignore_ascii_case(n_bytes))
+        }
+    } else {
+        line.to_lowercase().contains(needle)
+    }
+}
+
 #[tauri::command]
-fn search_workspace(
+async fn search_workspace(
     app: AppHandle,
     root: PathBuf,
     query: String,
@@ -696,7 +738,7 @@ fn search_workspace(
     require_capability(EditionCapability::WorkspaceSearch)?;
     let canonical_root = require_adopted_workspace(&app, &root)?;
 
-    let trimmed = query.trim();
+    let trimmed = query.trim().to_owned();
     if trimmed.is_empty() {
         return Ok(SearchOutcome {
             matches: Vec::new(),
@@ -704,61 +746,61 @@ fn search_workspace(
             scanned_files: 0,
         });
     }
-    let needle = if case_sensitive {
-        trimmed.to_owned()
-    } else {
-        trimmed.to_lowercase()
-    };
 
-    let mut matches = Vec::new();
-    let mut truncated = false;
-    let mut scanned_files = 0usize;
-
-    for path in walk_markdown_files(&canonical_root)? {
-        let Ok(metadata) = fs::metadata(&path) else {
-            continue;
+    tauri::async_runtime::spawn_blocking(move || {
+        let needle = if case_sensitive {
+            trimmed
+        } else {
+            trimmed.to_lowercase()
         };
-        if metadata.len() > MAX_SCAN_FILE_BYTES {
-            continue;
-        }
-        // Unreadable or non-UTF-8 files are skipped rather than failing the whole search.
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        scanned_files += 1;
-        let entry = workspace_entry(&canonical_root, &path);
 
-        for (index, line) in content.lines().enumerate() {
-            let haystack = if case_sensitive {
-                line.to_owned()
-            } else {
-                line.to_lowercase()
+        let mut matches = Vec::new();
+        let mut truncated = false;
+        let mut scanned_files = 0usize;
+
+        for path in walk_markdown_files(&canonical_root)? {
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
             };
-            if !haystack.contains(&needle) {
+            if metadata.len() > MAX_SCAN_FILE_BYTES {
                 continue;
             }
-            if matches.len() >= MAX_SEARCH_RESULTS {
-                truncated = true;
+            // Unreadable or non-UTF-8 files are skipped rather than failing the whole search.
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            scanned_files += 1;
+            let entry = workspace_entry(&canonical_root, &path);
+
+            for (index, line) in content.lines().enumerate() {
+                if !line_contains_query(line, &needle, case_sensitive) {
+                    continue;
+                }
+                if matches.len() >= MAX_SEARCH_RESULTS {
+                    truncated = true;
+                    break;
+                }
+                matches.push(SearchMatch {
+                    path: entry.path.clone(),
+                    relative_path: entry.relative_path.clone(),
+                    name: entry.name.clone(),
+                    line: index + 1,
+                    preview: preview_line(line),
+                });
+            }
+            if truncated {
                 break;
             }
-            matches.push(SearchMatch {
-                path: entry.path.clone(),
-                relative_path: entry.relative_path.clone(),
-                name: entry.name.clone(),
-                line: index + 1,
-                preview: preview_line(line),
-            });
         }
-        if truncated {
-            break;
-        }
-    }
 
-    Ok(SearchOutcome {
-        matches,
-        truncated,
-        scanned_files,
+        Ok(SearchOutcome {
+            matches,
+            truncated,
+            scanned_files,
+        })
     })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
 }
 
 fn find_char(chars: &[char], start: usize, needle: char) -> Option<usize> {
@@ -795,18 +837,36 @@ fn normalize_link_target(raw: &str) -> Option<String> {
 fn collect_line_references(line: &str, links: &mut Vec<String>, tags: &mut Vec<String>) {
     let chars: Vec<char> = line.chars().collect();
     let mut index = 0;
-    let mut in_code_span = false;
-
     while index < chars.len() {
         let current = chars[index];
 
         if current == '`' {
-            in_code_span = !in_code_span;
-            index += 1;
-            continue;
-        }
-        if in_code_span {
-            index += 1;
+            let start = index;
+            while index < chars.len() && chars[index] == '`' {
+                index += 1;
+            }
+            let run_len = index - start;
+            let mut search = index;
+            let mut found_close = false;
+            while search < chars.len() {
+                if chars[search] == '`' {
+                    let close_start = search;
+                    while search < chars.len() && chars[search] == '`' {
+                        search += 1;
+                    }
+                    if search - close_start == run_len {
+                        index = search;
+                        found_close = true;
+                        break;
+                    }
+                } else {
+                    search += 1;
+                }
+            }
+            if found_close {
+                continue;
+            }
+            index = start + 1;
             continue;
         }
 
@@ -913,7 +973,7 @@ fn extract_references(content: &str) -> (Vec<String>, Vec<String>) {
 }
 
 #[tauri::command]
-fn collect_workspace_references(
+async fn collect_workspace_references(
     app: AppHandle,
     root: PathBuf,
 ) -> Result<Vec<DocumentReferences>, AppError> {
@@ -926,35 +986,40 @@ fn collect_workspace_references(
         EditionCapability::WorkspaceIntelligence,
     ])?;
     let canonical_root = require_adopted_workspace(&app, &root)?;
-    let mut documents = Vec::new();
 
-    for path in walk_markdown_files(&canonical_root)? {
-        let Ok(metadata) = fs::metadata(&path) else {
-            continue;
-        };
-        if metadata.len() > MAX_SCAN_FILE_BYTES {
-            continue;
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut documents = Vec::new();
+
+        for path in walk_markdown_files(&canonical_root)? {
+            let Ok(metadata) = fs::metadata(&path) else {
+                continue;
+            };
+            if metadata.len() > MAX_SCAN_FILE_BYTES {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let (links, tags) = extract_references(&content);
+            let entry = workspace_entry(&canonical_root, &path);
+            documents.push(DocumentReferences {
+                path: entry.path,
+                relative_path: entry.relative_path,
+                name: entry.name,
+                links,
+                tags,
+            });
         }
-        let Ok(content) = fs::read_to_string(&path) else {
-            continue;
-        };
-        let (links, tags) = extract_references(&content);
-        let entry = workspace_entry(&canonical_root, &path);
-        documents.push(DocumentReferences {
-            path: entry.path,
-            relative_path: entry.relative_path,
-            name: entry.name,
-            links,
-            tags,
-        });
-    }
 
-    documents.sort_by(|a, b| {
-        a.relative_path
-            .to_lowercase()
-            .cmp(&b.relative_path.to_lowercase())
-    });
-    Ok(documents)
+        documents.sort_by(|a, b| {
+            a.relative_path
+                .to_lowercase()
+                .cmp(&b.relative_path.to_lowercase())
+        });
+        Ok(documents)
+    })
+    .await
+    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
 }
 
 fn should_visit(entry: &DirEntry) -> bool {
@@ -982,6 +1047,7 @@ fn is_markdown(path: &Path) -> bool {
 fn validate_file_name(name: &str) -> Result<(), AppError> {
     let trimmed = name.trim();
     if trimmed.is_empty()
+        || trimmed.len() > 255
         || trimmed == "."
         || trimmed == ".."
         || trimmed.starts_with('.')
@@ -1004,7 +1070,7 @@ fn validate_file_name(name: &str) -> Result<(), AppError> {
     if !is_markdown(Path::new(trimmed)) {
         return Err(AppError::NotMarkdown);
     }
-    // Windows reserved device names (CON, PRN, AUX, NUL, COM1.., LPT1..).
+    // Windows reserved device names (CON, PRN, AUX, NUL, COM0-9, LPT0-9, CONIN$, CONOUT$).
     let stem = Path::new(trimmed)
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1016,6 +1082,9 @@ fn validate_file_name(name: &str) -> Result<(), AppError> {
             | "PRN"
             | "AUX"
             | "NUL"
+            | "CONIN$"
+            | "CONOUT$"
+            | "COM0"
             | "COM1"
             | "COM2"
             | "COM3"
@@ -1025,6 +1094,7 @@ fn validate_file_name(name: &str) -> Result<(), AppError> {
             | "COM7"
             | "COM8"
             | "COM9"
+            | "LPT0"
             | "LPT1"
             | "LPT2"
             | "LPT3"
@@ -1182,7 +1252,13 @@ fn delete_workspace_document_inner(adopted_root: &Path, path: PathBuf) -> Result
 #[tauri::command]
 fn delete_workspace_document(app: AppHandle, root: PathBuf, path: PathBuf) -> Result<(), AppError> {
     let canonical_root = require_adopted_workspace(&app, &root)?;
-    delete_workspace_document_inner(&canonical_root, path)
+    let target = resolve_inside_workspace(&canonical_root, &path)?;
+    let canonical = fs::canonicalize(&target).unwrap_or_else(|_| target.clone());
+    delete_workspace_document_inner(&canonical_root, path)?;
+    if let Ok(mut guard) = app.state::<ConsentedPaths>().0.lock() {
+        guard.remove(&canonical);
+    }
+    Ok(())
 }
 
 fn capabilities_for_edition(edition: Edition) -> Vec<EditionCapability> {
@@ -1281,10 +1357,10 @@ fn markdown_paths(arguments: impl IntoIterator<Item = String>) -> Vec<String> {
         .into_iter()
         .filter_map(|argument| {
             let path = PathBuf::from(argument);
-            path.is_file().then_some(path)
+            let canonical = fs::canonicalize(&path).unwrap_or(path);
+            (canonical.is_file() && is_markdown(&canonical))
+                .then(|| canonical.to_string_lossy().into_owned())
         })
-        .filter(|path| is_markdown(path))
-        .map(|path| path.to_string_lossy().into_owned())
         .collect()
 }
 
@@ -1434,10 +1510,11 @@ fn allow_webview_navigation(url: &Url) -> bool {
     // Intentionally omit data:/blob: so a compromised renderer cannot navigate to active HTML.
     match url.scheme() {
         "tauri" | "asset" | "ipc" => true,
-        "http" | "https" => matches!(
-            url.host_str(),
-            Some("localhost") | Some("127.0.0.1") | Some("tauri.localhost") | Some("ipc.localhost")
-        ),
+        "http" | "https" => {
+            let host = url.host_str();
+            matches!(host, Some("tauri.localhost") | Some("ipc.localhost"))
+                || (cfg!(debug_assertions) && matches!(host, Some("localhost") | Some("127.0.0.1")))
+        }
         _ => false,
     }
 }
@@ -1706,6 +1783,11 @@ mod tests {
         assert!(validate_file_name("CON.md").is_err());
         assert!(validate_file_name("nul.md").is_err());
         assert!(validate_file_name("com1.md").is_err());
+        assert!(validate_file_name("com0.md").is_err());
+        assert!(validate_file_name("lpt0.md").is_err());
+        assert!(validate_file_name("conin$.md").is_err());
+        assert!(validate_file_name("conout$.md").is_err());
+        assert!(validate_file_name(&format!("{}.md", "a".repeat(300))).is_err());
     }
 
     #[test]
@@ -1735,13 +1817,23 @@ mod tests {
             "[definition]: notes/gamma.md\n",
             "Tagged #project and #deep/nested here.\n",
             "Inline `#notatag` and `[x](y.md)` stay out.\n",
+            "Multi-backtick `` `[y](z.md)` `` stays out.\n",
+            "Unclosed ` backtick should not swallow [Delta](notes/delta.md) here.\n",
             "```\n",
             "[fenced](fenced.md) #fencedtag\n",
             "```\n",
         );
 
         let (links, tags) = extract_references(content);
-        assert_eq!(links, vec!["notes/alpha.md", "Beta Note", "notes/gamma.md"]);
+        assert_eq!(
+            links,
+            vec![
+                "notes/alpha.md",
+                "Beta Note",
+                "notes/gamma.md",
+                "notes/delta.md"
+            ]
+        );
         assert_eq!(tags, vec!["project", "deep/nested"]);
     }
 

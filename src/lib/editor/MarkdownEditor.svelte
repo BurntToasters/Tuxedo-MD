@@ -217,9 +217,25 @@
     view.focus();
   }
 
+  const MAX_CACHED_STATES = 16;
+
+  function pruneExcessStates() {
+    if (states.size <= MAX_CACHED_STATES) return;
+    for (const id of states.keys()) {
+      if (id !== documentId) {
+        states.delete(id);
+        if (states.size <= MAX_CACHED_STATES) break;
+      }
+    }
+  }
+
   function stateForDocument(id: string, content: string, sel: { anchor: number; head: number }) {
     const cached = states.get(id);
-    if (cached && cached.doc.toString() === content) return cached;
+    if (cached && cached.doc.toString() === content) {
+      states.delete(id);
+      states.set(id, cached);
+      return cached;
+    }
     const selectionRange = cached
       ? {
           anchor: cached.selection.main.anchor,
@@ -227,7 +243,9 @@
         }
       : sel;
     const next = createState(content, selectionRange);
+    states.delete(id);
     states.set(id, next);
+    pruneExcessStates();
     return next;
   }
 
@@ -333,35 +351,56 @@
 </script>
 
 <div class="editor-container">
-  <div class="formatting-toolbar">
-    <button class="toolbar-btn" title="Bold" onclick={() => insertFormat('bold')}
+  <div class="formatting-toolbar" role="toolbar" aria-label="Formatting">
+    <button class="toolbar-btn" title="Bold" aria-label="Bold" onclick={() => insertFormat('bold')}
       ><Bold size={14} /></button
     >
-    <button class="toolbar-btn" title="Italic" onclick={() => insertFormat('italic')}
-      ><Italic size={14} /></button
+    <button
+      class="toolbar-btn"
+      title="Italic"
+      aria-label="Italic"
+      onclick={() => insertFormat('italic')}><Italic size={14} /></button
     >
-    <button class="toolbar-btn" title="Heading" onclick={() => insertFormat('heading')}
-      ><Heading size={14} /></button
+    <button
+      class="toolbar-btn"
+      title="Heading"
+      aria-label="Heading"
+      onclick={() => insertFormat('heading')}><Heading size={14} /></button
     >
-    <span class="toolbar-separator"></span>
-    <button class="toolbar-btn" title="Quote" onclick={() => insertFormat('quote')}
-      ><Quote size={14} /></button
+    <span class="toolbar-separator" role="separator"></span>
+    <button
+      class="toolbar-btn"
+      title="Quote"
+      aria-label="Quote"
+      onclick={() => insertFormat('quote')}><Quote size={14} /></button
     >
-    <button class="toolbar-btn" title="Code block" onclick={() => insertFormat('code')}
-      ><Code size={14} /></button
+    <button
+      class="toolbar-btn"
+      title="Code block"
+      aria-label="Code block"
+      onclick={() => insertFormat('code')}><Code size={14} /></button
     >
-    <button class="toolbar-btn" title="Link" onclick={() => insertFormat('link')}
+    <button class="toolbar-btn" title="Link" aria-label="Link" onclick={() => insertFormat('link')}
       ><Link size={14} /></button
     >
-    <span class="toolbar-separator"></span>
-    <button class="toolbar-btn" title="Unordered list" onclick={() => insertFormat('list')}
-      ><List size={14} /></button
+    <span class="toolbar-separator" role="separator"></span>
+    <button
+      class="toolbar-btn"
+      title="Unordered list"
+      aria-label="Unordered list"
+      onclick={() => insertFormat('list')}><List size={14} /></button
     >
-    <button class="toolbar-btn" title="Ordered list" onclick={() => insertFormat('ordered-list')}
-      ><ListOrdered size={14} /></button
+    <button
+      class="toolbar-btn"
+      title="Ordered list"
+      aria-label="Ordered list"
+      onclick={() => insertFormat('ordered-list')}><ListOrdered size={14} /></button
     >
-    <button class="toolbar-btn" title="Task list" onclick={() => insertFormat('task-list')}
-      ><ListTodo size={14} /></button
+    <button
+      class="toolbar-btn"
+      title="Task list"
+      aria-label="Task list"
+      onclick={() => insertFormat('task-list')}><ListTodo size={14} /></button
     >
   </div>
   <div class="editor-host" bind:this={host}></div>

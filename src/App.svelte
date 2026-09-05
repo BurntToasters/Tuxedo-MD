@@ -4,48 +4,39 @@
     Command,
     FilePlus2,
     FolderOpen,
-    History,
-    ListTree,
     PanelLeftOpen,
     Save,
-    Search,
     Settings2,
-    X,
-    Palette,
-    Link2,
-    Sparkles,
-    RefreshCw,
-    Sliders,
-    Scroll,
-    ChevronDown,
-    ChevronUp,
   } from '@lucide/svelte';
   import { onMount } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import { formatShortcut } from './lib/shortcuts';
   import { normalizeSettings } from './lib/settings';
   import MarkdownEditor from './lib/editor/MarkdownEditor.svelte';
-  import {
-    capabilityMessage,
-    editionLabel,
-    editionVersion,
-    editionWarning,
-    hasCapability,
-    isFullEdition,
-    opaqueWindow,
-    requireCapability,
-  } from './lib/edition';
+  import TabBar from './lib/chrome/TabBar.svelte';
+  import WorkspaceSidebar from './lib/chrome/WorkspaceSidebar.svelte';
+  import StatusBar from './lib/chrome/StatusBar.svelte';
+  import SettingsDialog from './lib/chrome/SettingsDialog.svelte';
+  import NamePromptDialog from './lib/chrome/NamePromptDialog.svelte';
+  import ConflictDialog from './lib/chrome/ConflictDialog.svelte';
+  import { focusedElement, restoreFocus } from './lib/focus';
+  import { capabilityMessage, editionState, hasCapability, requireCapability } from './lib/edition';
   import { setDraftIndexed as writeDraftIndex } from './lib/draft-index';
   import { renderMarkdown } from './lib/preview';
   import {
     hydrateSessionTabs,
-    normalizeDocumentTab,
-    normalizeDraftIndex,
+    isPathUnderWorkspace,
+    MAX_SESSION_TABS,
     normalizeSessionState,
     pathsReferToSameFile,
-    slimSessionTabs,
   } from './lib/session';
-  import { isTabDirty, neutralizeDiscardedTab, shouldPersistDraft } from './lib/tab-lifecycle';
+  import {
+    buildSessionPayload,
+    draftsToPersist,
+    recoverOrphanDrafts,
+    shouldReplaceWelcome,
+  } from './lib/session-controller';
+  import { isTabDirty, neutralizeDiscardedTab } from './lib/tab-lifecycle';
   import {
     chooseDocument,
     chooseSavePath,
@@ -59,7 +50,6 @@
     saveState,
     deleteState,
     takePendingOpenPaths,
-    getLicenses,
     setDocumentEdited,
     scanWorkspace,
     adoptWorkspaceFolder,
@@ -76,7 +66,6 @@
     sortedTagCounts,
     type LinkGraph,
   } from './lib/link-graph';
-  import WorkspaceTree from './lib/workspace/WorkspaceTree.svelte';
   import {
     buildWorkspaceTree,
     directoryIdsFor,
@@ -116,7 +105,6 @@
     type DocumentReferences,
     type FileDocument,
     type SearchMatch,
-    type SessionState,
     type UpdateChannel,
     type WorkspaceEntry,
   } from './lib/types';
@@ -174,85 +162,13 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let referencesLoading = $state(false);
   let referencesAttempted = $state(false);
   let namePrompt = $state<{ title: string; label: string; value: string } | null>(null);
-  let namePromptInput = $state<HTMLInputElement | null>(null);
-  let namePromptDialog = $state<HTMLDialogElement | null>(null);
-  let settingsDialog = $state<HTMLDialogElement | null>(null);
-  let conflictDialog = $state<HTMLDialogElement | null>(null);
-  let settingsInitialFocus = $state<HTMLButtonElement | null>(null);
-  let conflictInitialFocus = $state<HTMLButtonElement | null>(null);
+  let namePromptValue = $state('');
   let settleNamePrompt: ((value: string | null) => void) | null = null;
   let status = $state('Ready');
   let settings = $state<AppSettings>(defaultSettings);
   let settingsOpen = $state(false);
-  let activeSettingsTab = $state<'appearance' | 'editor' | 'files' | 'about'>('appearance');
   let updatesSupported = $state(false);
   let previousUpdateChannel = $state<UpdateChannel>(defaultSettings.updateChannel);
-
-  // Licensing variables
-  let licenses = $state<
-    Record<
-      string,
-      {
-        licenses: string | string[];
-        repository?: string;
-        publisher?: string;
-        licenseFile?: string;
-        licenseText?: string;
-      }
-    >
-  >({});
-  let licensesLoading = $state(false);
-  let licensesError = $state<string | null>(null);
-  let licenseSearch = $state('');
-  let expandedLicensePackage = $state<string | null>(null);
-
-  async function loadLicenses() {
-    if (Object.keys(licenses).length > 0) return;
-    licensesLoading = true;
-    licensesError = null;
-    try {
-      const raw = await getLicenses();
-      licenses = JSON.parse(raw);
-    } catch (err) {
-      licensesError = err instanceof Error ? err.message : String(err);
-    } finally {
-      licensesLoading = false;
-    }
-  }
-
-  $effect(() => {
-    if (activeSettingsTab === 'about' && settingsOpen) {
-      void loadLicenses();
-    }
-  });
-
-  // Focus and preselect the name field when the prompt opens, so the dialog is usable
-  // from the keyboard without relying on the autofocus attribute.
-  $effect(() => {
-    if (!namePrompt || !namePromptInput) return;
-    namePromptInput.focus();
-    namePromptInput.select();
-  });
-
-  $effect(() => {
-    if (settingsOpen && settingsDialog && !settingsDialog.open) settingsDialog.showModal();
-  });
-
-  $effect(() => {
-    if (namePrompt && namePromptDialog && !namePromptDialog.open) namePromptDialog.showModal();
-  });
-
-  $effect(() => {
-    if (conflictOpen && conflictDialog && !conflictDialog.open) conflictDialog.showModal();
-  });
-
-  $effect(() => {
-    if (settingsOpen) settingsInitialFocus?.focus();
-  });
-
-  $effect(() => {
-    if (conflictOpen) conflictInitialFocus?.focus();
-  });
 
   // Build the link graph lazily, the first time the Links panel is opened for a
   // workspace. Guarded by an attempt flag so a failing scan is not retried forever.
@@ -278,7 +194,6 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let externalCheckInFlight = false;
   const saveInFlightIds = new SvelteSet<string>();
   const cancelledSaveTabIds = new SvelteSet<string>();
-  let draftIndexChain: Promise<void> = Promise.resolve();
   let sessionRestoreComplete = false;
   const deferredOpenPaths: string[] = [];
   let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -314,21 +229,16 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       )
     )
   );
-  let outline = $derived(
-    (activeTab?.content ?? '')
+  let outline = $derived.by(() => {
+    if (!sidebarOpen || drawerPanel !== 'outline') return [];
+    return (activeTab?.content ?? '')
       .split('\n')
       .map((line, index) => {
         const match = /^(#{1,6})\s+(.+?)\s*#*$/.exec(line);
         return match ? { level: match[1].length, title: match[2], line: index + 1 } : null;
       })
-      .filter((item): item is { level: number; title: string; line: number } => item !== null)
-  );
-
-  let filteredLicensesList = $derived(
-    Object.entries(licenses)
-      .filter(([name]) => name.toLowerCase().includes(licenseSearch.toLowerCase()))
-      .sort((a, b) => a[0].localeCompare(b[0]))
-  );
+      .filter((item): item is { level: number; title: string; line: number } => item !== null);
+  });
 
   $effect(() => {
     const content = activeTab?.content ?? '';
@@ -375,7 +285,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         const state = await syncAppearanceEffects(
           effectiveGlassEffects,
           resolvedTheme !== 'light',
-          { opaqueWindow }
+          { opaqueWindow: editionState.opaqueWindow }
         );
         if (request === windowEffectRequest) root.dataset.windowFx = state;
       });
@@ -483,24 +393,9 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let namePromptReturnFocus: HTMLElement | null = null;
   let conflictReturnFocus: HTMLElement | null = null;
 
-  function focusedElement(): HTMLElement | null {
-    return document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  }
-
-  function isElementVisible(target: HTMLElement) {
-    if (!target.isConnected) return false;
-    let node: HTMLElement | null = target;
-    while (node) {
-      const style = getComputedStyle(node);
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
-      node = node.parentElement;
-    }
-    return true;
-  }
-
-  function restoreFocus(target: HTMLElement | null) {
-    if (target && isElementVisible(target)) queueMicrotask(() => target.focus());
-  }
+  let conflictTab = $derived(
+    conflictTabId ? (tabs.find((item) => item.id === conflictTabId) ?? null) : null
+  );
 
   function openCommandPalette() {
     if (settingsOpen || namePrompt || conflictOpen) return;
@@ -514,7 +409,6 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   function closeSettings() {
-    if (settingsDialog?.open) settingsDialog.close();
     if (!settingsOpen) return;
     settingsOpen = false;
     const target = settingsReturnFocus;
@@ -540,23 +434,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   }
 
   async function setDraftIndexed(id: string, keep: boolean) {
-    draftIndexChain = draftIndexChain.then(() =>
-      writeDraftIndex(id, keep, { loadState, saveState })
-    );
-    await draftIndexChain;
-  }
-
-  async function recoverOrphanDrafts(existing: DocumentTab[]): Promise<DocumentTab[]> {
-    const index = normalizeDraftIndex(await loadState<string[]>('draft-index'));
-    const recovered: DocumentTab[] = [];
-    for (const id of index) {
-      if (existing.some((tab) => tab.id === id)) continue;
-      const draft = normalizeDocumentTab(await loadState(`draft-${id}`));
-      if (!draft) continue;
-      if (draft.content === draft.savedContent && !draft.conflict) continue;
-      recovered.push({ ...draft, recovered: true });
-    }
-    return recovered;
+    await writeDraftIndex(id, keep, { loadState, saveState });
   }
 
   function showNextConflict() {
@@ -568,46 +446,12 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   function dismissConflictForTab(id: string) {
     conflictQueue = conflictQueue.filter((item) => item !== id);
     if (conflictTabId !== id) return;
-    conflictDialog?.close();
     conflictOpen = false;
     conflictTabId = null;
     const target = conflictReturnFocus;
     conflictReturnFocus = null;
     restoreFocus(target);
     showNextConflict();
-  }
-
-  function trapDialogFocus(event: KeyboardEvent) {
-    if (event.key !== 'Tab' || !(event.currentTarget instanceof HTMLDialogElement)) return;
-    const focusable = Array.from(
-      event.currentTarget.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [href], [tabindex]:not([tabindex="-1"])'
-      )
-    );
-    if (!focusable.length) {
-      event.preventDefault();
-      return;
-    }
-
-    const first = focusable[0];
-    const last = focusable.at(-1)!;
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
-
-  function handleDismissibleDialogKeydown(event: KeyboardEvent, close: () => void) {
-    if (event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      close();
-      return;
-    }
-    trapDialogFocus(event);
   }
 
   function commandPaletteItems(): CommandPaletteItem[] {
@@ -809,7 +653,16 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
   async function openPathsWhenReady(paths: string[]) {
     const markdownPaths = paths.filter(isMarkdownPath);
-    if (!markdownPaths.length) return;
+    if (!markdownPaths.length) {
+      if (paths.length === 1 && isDesktop()) {
+        try {
+          await openRecentWorkspace(paths[0]);
+        } catch {
+          // Non-workspace path ignored.
+        }
+      }
+      return;
+    }
     if (!sessionRestoreComplete) {
       deferredOpenPaths.push(...markdownPaths);
       return;
@@ -829,7 +682,13 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     const restorePromise = restoreState().finally(() => {
       flushDeferredOpenPaths();
     });
-    pollTimer = setInterval(() => void checkExternalChanges(), 2000);
+    let pollTick = 0;
+    pollTimer = setInterval(() => {
+      pollTick = (pollTick + 1) % 5;
+      void checkExternalChanges(pollTick === 0);
+    }, 2000);
+    const onWindowFocus = () => void checkExternalChanges(true);
+    window.addEventListener('focus', onWindowFocus);
     const onKeydown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         if (paletteOpen) {
@@ -922,6 +781,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     }
     return () => {
       window.removeEventListener('keydown', onKeydown);
+      window.removeEventListener('focus', onWindowFocus);
       if (pollTimer) clearInterval(pollTimer);
       for (const teardown of teardowns) teardown();
     };
@@ -948,15 +808,25 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
   function updateContent(content: string) {
     enableSessionPersist();
-    tabs = tabs.map((tab) => (tab.id === activeId ? { ...tab, content } : tab));
+    const current = tabs.find((tab) => tab.id === activeId);
+    if (current) {
+      current.content = content;
+    }
     schedulePersistence();
   }
 
   function updateSelection(selection: { anchor: number; head: number }) {
-    tabs = tabs.map((tab) => (tab.id === activeId ? { ...tab, selection } : tab));
+    const current = tabs.find((tab) => tab.id === activeId);
+    if (current) {
+      current.selection = selection;
+    }
   }
 
   function newDocument() {
+    if (tabs.length >= MAX_SESSION_TABS) {
+      status = `Maximum tab limit (${MAX_SESSION_TABS}) reached. Close a tab to open another.`;
+      return;
+    }
     enableSessionPersist();
     const tab = createTab();
     tabs = [...tabs, tab];
@@ -989,6 +859,10 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       }
       activeId = existing.id;
       schedulePersistence();
+      return;
+    }
+    if (tabs.length >= MAX_SESSION_TABS) {
+      status = `Maximum tab limit (${MAX_SESSION_TABS}) reached. Close a tab to open another.`;
       return;
     }
     const tab = {
@@ -1085,6 +959,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   function askForName(title: string, label: string, value: string): Promise<string | null> {
     settleNamePrompt?.(null);
     namePromptReturnFocus = focusedElement();
+    namePromptValue = value;
     namePrompt = { title, label, value };
     return new Promise((resolve) => {
       settleNamePrompt = resolve;
@@ -1096,7 +971,6 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     const target = namePromptReturnFocus;
     settleNamePrompt = null;
     namePromptReturnFocus = null;
-    namePromptDialog?.close();
     namePrompt = null;
     settle?.(value);
     restoreFocus(target);
@@ -1164,7 +1038,17 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     const warning = openTab
       ? `\n\n${node.name} is open in Tuxedo MD. Its tab will keep your text as an unsaved draft.`
       : '';
-    if (!confirm(`Delete ${node.name}? This cannot be undone.${warning}`)) return;
+    const confirmMessage = `Delete ${node.name}? This cannot be undone.${warning}`;
+    const shouldDelete = isDesktop()
+      ? await (async () => {
+          const { ask } = await import('@tauri-apps/plugin-dialog');
+          return ask(confirmMessage, {
+            title: 'Delete document',
+            kind: 'warning',
+          });
+        })()
+      : confirm(confirmMessage);
+    if (!shouldDelete) return;
     try {
       await deleteWorkspaceDocument(workspaceRoot, node.path);
       // Detach the open tab so its content survives as a dirty recovered draft.
@@ -1277,13 +1161,17 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
   async function openWorkspaceFile(path: string) {
     try {
-      // Under an adopted workspace, open/save need no extra consent.
-      // OS / recent paths outside the workspace still require an explicit consent grant.
+      const isUnderCurrent = Boolean(workspaceRoot && isPathUnderWorkspace(path, workspaceRoot));
+      if (!isUnderCurrent) {
+        await registerConsentedPath(path);
+      }
       try {
         addDocument(await readDocument(path));
       } catch {
-        await registerConsentedPath(path);
-        addDocument(await readDocument(path));
+        if (isUnderCurrent) {
+          await registerConsentedPath(path);
+          addDocument(await readDocument(path));
+        }
       }
     } catch (error) {
       status = readableError(error);
@@ -1411,7 +1299,17 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     const anchor = target.closest('a');
     if (!(anchor instanceof HTMLAnchorElement)) return;
     const href = anchor.getAttribute('href');
-    if (!href || href.startsWith('#')) return;
+    if (!href) return;
+    if (href.startsWith('#')) {
+      event.preventDefault();
+      event.stopPropagation();
+      const targetId = decodeURIComponent(href.slice(1));
+      const targetEl =
+        document.getElementById(targetId) ??
+        document.querySelector(`[name="${CSS.escape(targetId)}"]`);
+      targetEl?.scrollIntoView({ behavior: 'smooth' });
+      return;
+    }
     event.preventDefault();
     event.stopPropagation();
     try {
@@ -1574,21 +1472,11 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         if (generation !== persistGeneration) return;
         // Live flag cancels stale in-flight writes after restore is turned off.
         if (snapshot.sessionPersistEnabled && sessionPersistEnabled) {
-          const session: SessionState = {
-            version: 1,
-            activeId: snapshot.activeId,
-            mode: snapshot.mode,
-            workspaceRoot: snapshot.workspaceRoot,
-            tabs: slimSessionTabs(snapshot.tabs),
-            recentFiles: snapshot.recentFiles,
-            recentWorkspaces: snapshot.recentWorkspaces,
-          };
+          const session = buildSessionPayload(snapshot);
           await saveState('session', session);
         }
         // Draft bodies stay recoverable even when session restore is disabled.
-        for (const tab of snapshot.tabs.filter(
-          (item) => shouldPersistDraft(item) && !cancelledSaveTabIds.has(item.id)
-        )) {
+        for (const tab of draftsToPersist(snapshot.tabs, cancelledSaveTabIds)) {
           if (generation !== persistGeneration) return;
           await saveState(`draft-${tab.id}`, tab);
           await setDraftIndexed(tab.id, true);
@@ -1609,12 +1497,12 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     let sessionRestored = false;
     let restoreFailed = false;
     try {
-      const loadedSettings = await loadState<AppSettings>('settings');
+      const loadedSettings = await loadState('settings', normalizeSettings);
       if (loadedSettings?.version === 1) {
-        settings = normalizeSettings(loadedSettings);
+        settings = loadedSettings;
         previousUpdateChannel = settings.updateChannel;
       }
-      const session = normalizeSessionState(await loadState<SessionState>('session'));
+      const session = await loadState('session', normalizeSessionState);
       if (session && settings.restoreSession) {
         // Adopt before hydrate/scan — scan no longer auto-adopts.
         if (session.workspaceRoot) {
@@ -1645,15 +1533,13 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         sessionRestored = true;
       }
 
-      const recovered = settings.restoreSession ? await recoverOrphanDrafts(tabs) : [];
+      const recovered = settings.restoreSession
+        ? await recoverOrphanDrafts(tabs, { loadState })
+        : [];
       if (recovered.length) {
-        const onlyWelcome =
-          tabs.length === 1 &&
-          tabs[0].name === 'Welcome.md' &&
-          tabs[0].content === welcomeMarkdown &&
-          !tabs[0].path;
-        tabs = onlyWelcome && !sessionRestored ? recovered : [...tabs, ...recovered];
-        if (onlyWelcome && !sessionRestored) activeId = recovered[0].id;
+        const onlyWelcome = shouldReplaceWelcome(tabs, sessionRestored, welcomeMarkdown);
+        tabs = onlyWelcome ? recovered : [...tabs, ...recovered];
+        if (onlyWelcome) activeId = recovered[0].id;
         status = sessionRestored
           ? `Session restored · ${recovered.length} draft(s) recovered`
           : `Recovered ${recovered.length} draft(s)`;
@@ -1678,11 +1564,14 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     }
   }
 
-  async function checkExternalChanges() {
+  async function checkExternalChanges(allTabs = false) {
     if (!isDesktop() || externalCheckInFlight) return;
     externalCheckInFlight = true;
     try {
-      for (const tab of tabs.filter((item) => item.path && !item.conflict)) {
+      const candidates = tabs.filter(
+        (item) => item.path && !item.conflict && (allTabs || item.id === activeId)
+      );
+      for (const tab of candidates) {
         const tabId = tab.id;
         const path = tab.path!;
         try {
@@ -1784,7 +1673,6 @@ Try editing this document, or open a Markdown file from the toolbar.`;
             : item
         );
       }
-      conflictDialog?.close();
       conflictOpen = false;
       conflictTabId = null;
       const target = conflictReturnFocus;
@@ -1857,47 +1745,31 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       {#if isWindowsChrome}
         <WindowMenubar oncommand={runMenuCommand} {updatesSupported} />
         <span
-          class:pro={isFullEdition}
+          class:pro={editionState.isFullEdition}
           class="edition titlebar-edition-chip"
-          title={editionLabel}
-          aria-label={`${editionLabel} edition`}>{isFullEdition ? 'PRO' : 'CE'}</span
+          title={editionState.editionLabel}
+          aria-label={`${editionState.editionLabel} edition`}
+          >{editionState.isFullEdition ? 'PRO' : 'CE'}</span
         >
         <span class="titlebar-inline-divider" aria-hidden="true"></span>
       {:else}
         <div class="brand" data-tauri-drag-region>
           <div class="brand-mark"><BookOpenText size={18} /></div>
           <span>Tuxedo MD</span>
-          <span class:pro={isFullEdition} class="edition">{isFullEdition ? 'PRO' : 'CE'}</span>
+          <span class:pro={editionState.isFullEdition} class="edition"
+            >{editionState.isFullEdition ? 'PRO' : 'CE'}</span
+          >
         </div>
       {/if}
 
-      <div class="titlebar-tabs" data-tauri-drag-region={isWindowsChrome ? undefined : true}>
-        {#each tabs as tab (tab.id)}
-          {@const dirty = isTabDirty(tab)}
-          <div class:active={tab.id === activeId} class="titlebar-tab">
-            <button class="tab-select" onclick={() => (activeId = tab.id)}>
-              <span
-                class:dirty
-                title={tab.conflict
-                  ? `${tab.name} (conflict with disk)`
-                  : tab.recovered
-                    ? `${tab.name} (recovered draft)`
-                    : undefined}>{tab.name}{tab.conflict ? ' !' : tab.recovered ? ' •' : ''}</span
-              >
-            </button>
-            <button
-              class="tab-close"
-              title={`Close ${tab.name}`}
-              aria-label={`Close ${tab.name}`}
-              onclick={(event) => {
-                event.stopPropagation();
-                void closeTab(tab.id);
-              }}><X /></button
-            >
-          </div>
-        {/each}
-        <button class="titlebar-new-tab" onclick={newDocument} title="New tab">+</button>
-      </div>
+      <TabBar
+        {tabs}
+        {activeId}
+        {isWindowsChrome}
+        onselect={(id) => (activeId = id)}
+        onclose={(id) => void closeTab(id)}
+        onnew={newDocument}
+      />
 
       {#if isWindowsChrome}
         <div class="titlebar-drag-fill" data-tauri-drag-region></div>
@@ -1961,260 +1833,50 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   </header>
 
   <div class="workspace">
-    {#if sidebarOpen}
-      {#if drawerOverlay}
-        <button
-          class="drawer-backdrop"
-          aria-label="Close tools"
-          onclick={() => void setSidebarOpen(false)}
-        ></button>
-      {/if}
-      <aside class:overlay={drawerOverlay} class="sidebar" aria-label="Workspace tools">
-        <div class="sidebar-heading">
-          <div>
-            <span>Tools</span>
-            <strong>{drawerPanel}</strong>
-          </div>
-          <button
-            class="icon-button quiet"
-            onclick={() => void setSidebarOpen(false)}
-            title="Hide tools"><X /></button
-          >
-        </div>
-        <nav class="drawer-tabs" aria-label="Tool panels">
-          <button class:active={drawerPanel === 'files'} onclick={() => (drawerPanel = 'files')}
-            ><FolderOpen /> Files</button
-          >
-          {#if canSearchWorkspace}
-            <button class:active={drawerPanel === 'search'} onclick={() => (drawerPanel = 'search')}
-              ><Search /> Search</button
-            >
-          {/if}
-          {#if showReferencePanel}
-            <button class:active={drawerPanel === 'links'} onclick={() => (drawerPanel = 'links')}
-              ><Link2 /> Links</button
-            >
-          {/if}
-          <button class:active={drawerPanel === 'outline'} onclick={() => (drawerPanel = 'outline')}
-            ><ListTree /> Outline</button
-          >
-          <button class:active={drawerPanel === 'recent'} onclick={() => (drawerPanel = 'recent')}
-            ><History /> Recent</button
-          >
-        </nav>
-        {#if drawerPanel === 'files'}
-          <p class="drawer-context">
-            {workspaceRoot
-              ? (workspaceRoot.split(/[\\/]/).at(-1) ?? 'Workspace')
-              : 'No workspace open'}
-          </p>
-          <div class="workspace-actions">
-            <button class="open-workspace" onclick={openWorkspace}
-              ><FolderOpen /> Open workspace</button
-            >
-            {#if workspaceRoot}
-              <button
-                class="icon-button"
-                title="New document in this workspace"
-                aria-label="New document in this workspace"
-                onclick={() => void createDocumentInWorkspace('')}><FilePlus2 /></button
-              >
-              <button
-                class="icon-button"
-                title="Refresh workspace"
-                aria-label="Refresh workspace"
-                onclick={() => void refreshWorkspace()}><RefreshCw /></button
-              >
-            {/if}
-          </div>
-          <label class="search-box">
-            <Search />
-            <input bind:value={filter} placeholder="Filter files" />
-          </label>
-          <div class="file-list">
-            {#if workspaceRoot}
-              <WorkspaceTree
-                rows={treeRows}
-                activePath={activeTab?.path ?? null}
-                onopen={(node) => node.path && void openWorkspaceFile(node.path)}
-                ontoggle={toggleDirectory}
-                oncontextaction={handleTreeAction}
-              />
-            {:else}
-              <p class="empty-state">Open a folder to begin.</p>
-            {/if}
-          </div>
-          {#if !canSearchWorkspace || !showReferencePanel}
-            <div class="sidebar-upgrade" title={capabilityMessage('workspaceSearch')}>
-              <Sparkles />
-              <div>
-                <strong>More in Pro</strong>
-                <span>Workspace search, backlinks, wiki links, and tags.</span>
-              </div>
-            </div>
-          {/if}
-        {:else if drawerPanel === 'search'}
-          <form
-            class="search-form"
-            onsubmit={(event) => {
-              event.preventDefault();
-              void runWorkspaceSearch();
-            }}
-          >
-            <label class="search-box">
-              <Search />
-              <input
-                bind:value={searchQuery}
-                placeholder="Search workspace text"
-                aria-label="Search workspace text"
-              />
-            </label>
-            <label class="search-option">
-              <input type="checkbox" bind:checked={searchCaseSensitive} />
-              <span>Match case</span>
-            </label>
-            <button class="open-workspace" type="submit" disabled={searchRunning}>
-              {searchRunning ? 'Searching…' : 'Search'}
-            </button>
-          </form>
-          <div class="drawer-list search-results">
-            {#if !workspaceRoot}
-              <p class="empty-state">Open a workspace folder to search it.</p>
-            {:else if searchRunning}
-              <p class="empty-state">Scanning workspace…</p>
-            {:else if !searchSubmitted}
-              <p class="empty-state">Search Markdown text across this workspace.</p>
-            {:else if !groupedSearchResults.length}
-              <p class="empty-state">No matches found.</p>
-            {:else}
-              {#each groupedSearchResults as group (group.relativePath)}
-                <div class="search-group">
-                  <h3 class="search-group-heading" title={group.relativePath}>
-                    {group.relativePath}
-                  </h3>
-                  {#each group.matches as match (`${match.path}:${match.line}`)}
-                    <button
-                      class="search-hit"
-                      onclick={() => void openAndReveal(match.path, match.line)}
-                      title={`Open at line ${match.line}`}
-                    >
-                      <span class="search-hit-line">{match.line}</span>
-                      <span class="search-hit-preview">{match.preview}</span>
-                    </button>
-                  {/each}
-                </div>
-              {/each}
-              {#if searchTruncated}
-                <p class="empty-state">Showing the first 500 matches. Narrow the query for more.</p>
-              {/if}
-            {/if}
-          </div>
-        {:else if drawerPanel === 'links'}
-          <div class="drawer-list link-panel">
-            {#if !workspaceRoot}
-              <p class="empty-state">Open a workspace folder to map its links.</p>
-            {:else if referencesLoading}
-              <p class="empty-state">Reading workspace links…</p>
-            {:else if !linkGraph}
-              <button class="open-workspace" onclick={() => void refreshReferences()}
-                >Analyze workspace links</button
-              >
-            {:else}
-              <button class="open-workspace" onclick={() => void refreshReferences()}
-                ><RefreshCw /> Re-analyze</button
-              >
-              {#if canUseBacklinks}
-                <h3 class="recent-heading">
-                  Backlinks{activeRelativePath ? ` to ${activeTab?.name}` : ''}
-                </h3>
-                <nav class="outline-list" aria-label="Backlinks">
-                  {#each activeBacklinks as source (source)}
-                    <button onclick={() => void openWorkspaceRelative(source)} title={source}
-                      >{source}</button
-                    >
-                  {:else}
-                    <p class="empty-state">
-                      {activeRelativePath
-                        ? 'Nothing links here yet.'
-                        : 'Open a workspace document to see its backlinks.'}
-                    </p>
-                  {/each}
-                </nav>
-              {/if}
-              {#if canUseTags}
-                <h3 class="recent-heading">Tags</h3>
-                <div class="tag-cloud">
-                  {#each tagCounts as item (item.tag)}
-                    <button
-                      class="tag-chip"
-                      onclick={() => searchForTag(item.tag)}
-                      disabled={!canSearchWorkspace}
-                      title={canSearchWorkspace
-                        ? `Search for #${item.tag}`
-                        : `#${item.tag} appears in ${item.count} documents`}
-                      >#{item.tag} <span>{item.count}</span></button
-                    >
-                  {:else}
-                    <p class="empty-state">No tags in this workspace.</p>
-                  {/each}
-                </div>
-              {/if}
-              {#if canInspectWorkspace}
-                <h3 class="recent-heading">Broken links ({linkGraph.broken.length})</h3>
-                <nav class="outline-list" aria-label="Broken links">
-                  {#each linkGraph.broken.slice(0, 50) as item (`${item.from}->${item.target}`)}
-                    <button
-                      onclick={() => void openWorkspaceRelative(item.from)}
-                      title={`${item.from} links to ${item.target}`}
-                      >{item.target} <small>in {item.from}</small></button
-                    >
-                  {:else}
-                    <p class="empty-state">Every local link resolves.</p>
-                  {/each}
-                </nav>
-                <h3 class="recent-heading">Orphaned notes ({linkGraph.orphans.length})</h3>
-                <nav class="outline-list" aria-label="Orphaned notes">
-                  {#each linkGraph.orphans.slice(0, 50) as path (path)}
-                    <button onclick={() => void openWorkspaceRelative(path)} title={path}
-                      >{path}</button
-                    >
-                  {:else}
-                    <p class="empty-state">Every document has an inbound link.</p>
-                  {/each}
-                </nav>
-              {/if}
-            {/if}
-          </div>
-        {:else if drawerPanel === 'outline'}
-          <nav class="outline-list drawer-list" aria-label="Document outline">
-            {#each outline as item (item.line)}
-              <button
-                style={`--outline-level:${item.level}`}
-                onclick={() => revealOutlineItem(item)}
-                title={`Line ${item.line}`}>{item.title}</button
-              >
-            {:else}<p class="empty-state">No headings in this document.</p>{/each}
-          </nav>
-        {:else}
-          <div class="recent-groups drawer-list">
-            <h3 class="recent-heading">Files</h3>
-            <nav class="outline-list" aria-label="Recent files">
-              {#each recentFiles as path (path)}<button
-                  onclick={() => openWorkspaceFile(path)}
-                  title={path}>{path.split(/[\\/]/).at(-1)}</button
-                >{:else}<p class="empty-state">No recent files yet.</p>{/each}
-            </nav>
-            <h3 class="recent-heading">Workspaces</h3>
-            <nav class="outline-list" aria-label="Recent workspaces">
-              {#each recentWorkspaces as root (root)}<button
-                  onclick={() => void openRecentWorkspace(root)}
-                  title={root}>{root.split(/[\\/]/).at(-1) || root}</button
-                >{:else}<p class="empty-state">No recent workspaces yet.</p>{/each}
-            </nav>
-          </div>
-        {/if}
-      </aside>
-    {/if}
+    <WorkspaceSidebar
+      {sidebarOpen}
+      {drawerOverlay}
+      bind:drawerPanel
+      {workspaceRoot}
+      bind:filter
+      {treeRows}
+      activePath={activeTab?.path ?? null}
+      activeTabName={activeTab?.name ?? null}
+      {activeRelativePath}
+      {canSearchWorkspace}
+      {showReferencePanel}
+      {canUseBacklinks}
+      {canUseTags}
+      {canInspectWorkspace}
+      bind:searchQuery
+      bind:searchCaseSensitive
+      {searchRunning}
+      {searchSubmitted}
+      {searchTruncated}
+      {groupedSearchResults}
+      {referencesLoading}
+      {linkGraph}
+      {activeBacklinks}
+      {tagCounts}
+      {outline}
+      {recentFiles}
+      {recentWorkspaces}
+      onclose={() => void setSidebarOpen(false)}
+      onopenworkspace={openWorkspace}
+      oncreatedocument={(dir) => void createDocumentInWorkspace(dir)}
+      onrefreshworkspace={() => void refreshWorkspace()}
+      onopenworkspacefile={(path) => void openWorkspaceFile(path)}
+      ontoggledirectory={toggleDirectory}
+      ontreeaction={handleTreeAction}
+      onsearch={() => void runWorkspaceSearch()}
+      onopenandreveal={(path, line) => void openAndReveal(path, line)}
+      onrefreshreferences={() => void refreshReferences()}
+      onopenworkspacerelative={(path) => void openWorkspaceRelative(path)}
+      onsearchfortag={searchForTag}
+      onrevealoutlineitem={revealOutlineItem}
+      onopenrecentworkspace={(root) => void openRecentWorkspace(root)}
+      {capabilityMessage}
+    />
 
     <main class="main-area">
       <section class:split-layout={mode === 'split'} class="editor-grid">
@@ -2248,450 +1910,43 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         {/if}
       </section>
 
-      <footer class="statusbar">
-        <span>{editionWarning ? `${status} · ${editionWarning}` : status}</span>
-        <span
-          >{activeTab?.content.length ?? 0} characters · {activeTab?.content.trim()
-            ? activeTab.content.trim().split(/\s+/).length
-            : 0} words</span
-        >
-      </footer>
+      <StatusBar
+        {status}
+        editionWarning={editionState.editionWarning}
+        content={activeTab?.content ?? ''}
+      />
     </main>
   </div>
 </div>
 
-{#if settingsOpen}
-  <div
-    class="modal-backdrop"
-    role="presentation"
-    onclick={(event) => {
-      if (event.target === event.currentTarget) closeSettings();
-    }}
-  >
-    <dialog
-      bind:this={settingsDialog}
-      class="settings-modal tabbed-layout"
-      aria-modal="true"
-      aria-labelledby="settings-title"
-      onkeydown={(event) => handleDismissibleDialogKeydown(event, closeSettings)}
-      oncancel={(event) => {
-        event.preventDefault();
-        closeSettings();
-      }}
-    >
-      <header class="settings-header">
-        <h2 id="settings-title">Settings</h2>
-        <button
-          class="icon-button"
-          aria-label="Close settings"
-          bind:this={settingsInitialFocus}
-          onclick={closeSettings}><X /></button
-        >
-      </header>
-      <div class="settings-body">
-        <aside class="settings-sidebar">
-          <button
-            class:active={activeSettingsTab === 'appearance'}
-            onclick={() => (activeSettingsTab = 'appearance')}
-          >
-            <Palette size={16} /> <span>Appearance</span>
-          </button>
-          <button
-            class:active={activeSettingsTab === 'editor'}
-            onclick={() => (activeSettingsTab = 'editor')}
-          >
-            <Sliders size={16} /> <span>Editor</span>
-          </button>
-          <button
-            class:active={activeSettingsTab === 'files'}
-            onclick={() => (activeSettingsTab = 'files')}
-          >
-            <Save size={16} /> <span>Files & AutoSave</span>
-          </button>
-          <button
-            class:active={activeSettingsTab === 'about'}
-            onclick={() => (activeSettingsTab = 'about')}
-          >
-            <Scroll size={16} /> <span>About & Licenses</span>
-          </button>
-        </aside>
+<SettingsDialog
+  bind:settings
+  open={settingsOpen}
+  editionLabel={editionState.editionLabel}
+  editionVersion={editionState.editionVersion}
+  editionWarning={editionState.editionWarning}
+  isFullEdition={editionState.isFullEdition}
+  {updatesSupported}
+  oncheckupdates={() => void checkUpdates()}
+  onclose={closeSettings}
+  onopenexternalurl={openExternalUrl}
+/>
 
-        <main class="settings-content">
-          {#if activeSettingsTab === 'appearance'}
-            <div class="settings-section">
-              <h3>Appearance</h3>
+<NamePromptDialog
+  open={!!namePrompt}
+  title={namePrompt?.title ?? ''}
+  label={namePrompt?.label ?? ''}
+  bind:value={namePromptValue}
+  onsubmit={(value) => resolveNamePrompt(value)}
+  oncancel={() => resolveNamePrompt(null)}
+/>
 
-              <div class="settings-group">
-                <div class="settings-label">Theme</div>
-                <div class="select-wrapper">
-                  <select bind:value={settings.theme}>
-                    <option value="system">System</option>
-                    <option value="dark">Dark</option>
-                    <option value="light">Light</option>
-                    <option value="contrast">High contrast</option>
-                  </select>
-                </div>
-              </div>
-
-              <div class="settings-group">
-                <div class="settings-label">Glass effects</div>
-                <div class="select-wrapper">
-                  <select bind:value={settings.glassEffects}>
-                    <option value="system">Follow system</option>
-                    <option value="on">Always on</option>
-                    <option value="off">Off</option>
-                  </select>
-                </div>
-              </div>
-
-              <div class="settings-group">
-                <div class="settings-label">Preview font family</div>
-                <div class="select-wrapper">
-                  <select bind:value={settings.previewFont}>
-                    <option value="sans">Sans-Serif (Standard)</option>
-                    <option value="serif">Serif (Literary)</option>
-                    <option value="mono">Monospace (Code)</option>
-                  </select>
-                </div>
-              </div>
-
-              <div class="settings-group toggle-group">
-                <label class="switch-container">
-                  <span>Focus Mode (Hides UI chrome)</span>
-                  <input type="checkbox" bind:checked={settings.focusMode} />
-                  <span class="switch-slider"></span>
-                </label>
-              </div>
-            </div>
-          {:else if activeSettingsTab === 'editor'}
-            <div class="settings-section">
-              <h3>Editor</h3>
-
-              <div class="settings-group">
-                <div class="settings-label">Editor font size ({settings.fontSize}px)</div>
-                <input
-                  class="range-slider"
-                  type="range"
-                  min="12"
-                  max="22"
-                  bind:value={settings.fontSize}
-                />
-              </div>
-
-              <div class="settings-group toggle-group">
-                <label class="switch-container">
-                  <span>Wrap editor lines</span>
-                  <input type="checkbox" bind:checked={settings.lineWrap} />
-                  <span class="switch-slider"></span>
-                </label>
-              </div>
-
-              <div class="settings-group toggle-group">
-                <label class="switch-container">
-                  <span>Show line numbers</span>
-                  <input type="checkbox" bind:checked={settings.showLineNumbers} />
-                  <span class="switch-slider"></span>
-                </label>
-              </div>
-
-              <div class="settings-group">
-                <div class="settings-label">Tab size</div>
-                <div class="segmented-control">
-                  <button
-                    class:active={settings.tabSize === 2}
-                    onclick={() => (settings.tabSize = 2)}>2 spaces</button
-                  >
-                  <button
-                    class:active={settings.tabSize === 4}
-                    onclick={() => (settings.tabSize = 4)}>4 spaces</button
-                  >
-                </div>
-              </div>
-
-              <div class="settings-group toggle-group">
-                <label class="switch-container">
-                  <span>Enable editor spellcheck</span>
-                  <input type="checkbox" bind:checked={settings.spellcheck} />
-                  <span class="switch-slider"></span>
-                </label>
-              </div>
-            </div>
-          {:else if activeSettingsTab === 'files'}
-            <div class="settings-section">
-              <h3>Files & AutoSave</h3>
-
-              <div class="settings-group toggle-group">
-                <label class="switch-container">
-                  <span>Autosave existing files</span>
-                  <input type="checkbox" bind:checked={settings.autosave} />
-                  <span class="switch-slider"></span>
-                </label>
-              </div>
-
-              {#if settings.autosave}
-                <div class="settings-group">
-                  <div class="settings-label">Autosave delay</div>
-                  <div class="select-wrapper">
-                    <select bind:value={settings.autosaveDelayMs}>
-                      <option value={500}>0.5 seconds</option>
-                      <option value={1500}>1.5 seconds</option>
-                      <option value={3000}>3 seconds</option>
-                    </select>
-                  </div>
-                </div>
-              {/if}
-
-              <div class="settings-group toggle-group">
-                <label class="switch-container">
-                  <span>Restore full session on startup</span>
-                  <input type="checkbox" bind:checked={settings.restoreSession} />
-                  <span class="switch-slider"></span>
-                </label>
-              </div>
-
-              <div class="settings-group toggle-group">
-                <label class="switch-container">
-                  <span>Keep untitled drafts silently when closing tabs</span>
-                  <input type="checkbox" bind:checked={settings.keepDraftsSilently} />
-                  <span class="switch-slider"></span>
-                </label>
-              </div>
-
-              <p class="settings-note">
-                Closing the app temp-saves open tabs in your OS app-data folder and restores them
-                next launch without writing your Markdown files. Closing a tab still asks Save /
-                Don't Save / Cancel unless silent untitled drafts are enabled (path-backed files
-                always prompt).
-              </p>
-            </div>
-          {:else if activeSettingsTab === 'about'}
-            <div class="settings-section">
-              <h3>About & Licenses</h3>
-
-              <div class="about-branding">
-                <div class="about-logo"><BookOpenText size={32} /></div>
-                <div class="about-meta">
-                  <h4>Tuxedo MD</h4>
-                  <div class="about-meta-row">
-                    <span>v{editionVersion ?? '0.1.0-alpha.1'}</span>
-                    <span class:pro={isFullEdition} class="edition"
-                      >{isFullEdition ? 'PRO' : 'CE'}</span
-                    >
-                  </div>
-                </div>
-              </div>
-
-              <p class="settings-note">
-                {isFullEdition
-                  ? 'Pro is enabled for advanced local workflows, publishing, intelligence, and customization.'
-                  : 'Community includes complete local Markdown editing. Pro adds advanced local workflows, publishing, intelligence, and customization.'}
-              </p>
-              {#if editionWarning}
-                <p class="settings-note" role="alert">
-                  <strong>Edition check:</strong>
-                  {editionWarning}
-                </p>
-              {/if}
-
-              {#if updatesSupported}
-                <h3>Updates</h3>
-                <div class="settings-group toggle-group">
-                  <label class="switch-container">
-                    <span>Check for updates automatically</span>
-                    <input type="checkbox" bind:checked={settings.autoCheckUpdates} />
-                    <span class="switch-slider"></span>
-                  </label>
-                </div>
-                <div class="settings-group">
-                  <div class="settings-label">Update channel</div>
-                  <div class="select-wrapper">
-                    <select bind:value={settings.updateChannel}>
-                      <option value="auto">Auto (follow installed build)</option>
-                      <option value="stable">Stable</option>
-                      <option value="beta">Beta</option>
-                    </select>
-                  </div>
-                </div>
-                <div class="settings-group">
-                  <button type="button" class="settings-action" onclick={() => void checkUpdates()}
-                    >Check now</button
-                  >
-                </div>
-                <p class="settings-note">
-                  GitHub releases power in-app updates for direct Windows, macOS, and Linux builds.
-                  Store builds update through the Mac App Store or Microsoft Store instead.
-                </p>
-              {/if}
-
-              <div class="licenses-section">
-                <div class="licenses-header">
-                  <h5>Third-party Licenses</h5>
-                  <div class="licenses-search">
-                    <Search size={14} />
-                    <input
-                      type="text"
-                      placeholder="Search package licenses..."
-                      bind:value={licenseSearch}
-                    />
-                  </div>
-                </div>
-
-                <div class="licenses-list">
-                  {#if licensesLoading}
-                    <div class="loading-state">Loading dependency licenses...</div>
-                  {:else if licensesError}
-                    <div class="error-state">Error loading licenses: {licensesError}</div>
-                  {:else if filteredLicensesList.length === 0}
-                    <div class="empty-state">No packages found matching search filter.</div>
-                  {:else}
-                    {#each filteredLicensesList as [pkgName, pkgInfo] (pkgName)}
-                      <div class="license-card">
-                        <button
-                          class="license-card-header"
-                          onclick={() => {
-                            expandedLicensePackage =
-                              expandedLicensePackage === pkgName ? null : pkgName;
-                          }}
-                        >
-                          <div class="license-pkg-info">
-                            <span class="pkg-name">{pkgName}</span>
-                            <span class="pkg-license"
-                              >{Array.isArray(pkgInfo.licenses)
-                                ? pkgInfo.licenses.join(', ')
-                                : pkgInfo.licenses || 'Unknown'}</span
-                            >
-                          </div>
-                          <span class="expand-icon">
-                            {#if expandedLicensePackage === pkgName}
-                              <ChevronUp size={16} />
-                            {:else}
-                              <ChevronDown size={16} />
-                            {/if}
-                          </span>
-                        </button>
-                        {#if expandedLicensePackage === pkgName}
-                          <div class="license-card-body">
-                            {#if pkgInfo.publisher}
-                              <p class="license-meta">
-                                <strong>Publisher:</strong>
-                                {pkgInfo.publisher}
-                              </p>
-                            {/if}
-                            {#if pkgInfo.repository}
-                              <p class="license-meta">
-                                <strong>Repository:</strong>
-                                <a
-                                  href={pkgInfo.repository}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  onclick={(event) => {
-                                    event.preventDefault();
-                                    void openExternalUrl(pkgInfo.repository!).catch((error) => {
-                                      status = readableError(error);
-                                    });
-                                  }}>{pkgInfo.repository}</a
-                                >
-                              </p>
-                            {/if}
-                            {#if pkgInfo.licenseText}
-                              <pre class="license-text">{pkgInfo.licenseText}</pre>
-                            {/if}
-                          </div>
-                        {/if}
-                      </div>
-                    {/each}
-                  {/if}
-                </div>
-              </div>
-            </div>
-          {/if}
-        </main>
-      </div>
-    </dialog>
-  </div>
-{/if}
-
-{#if namePrompt}
-  <div
-    class="modal-backdrop"
-    role="presentation"
-    onclick={(event) => {
-      if (event.target === event.currentTarget) resolveNamePrompt(null);
-    }}
-  >
-    <dialog
-      bind:this={namePromptDialog}
-      class="settings-modal"
-      aria-modal="true"
-      aria-labelledby="name-prompt-title"
-      onkeydown={(event) => handleDismissibleDialogKeydown(event, () => resolveNamePrompt(null))}
-      oncancel={(event) => {
-        event.preventDefault();
-        resolveNamePrompt(null);
-      }}
-    >
-      <header>
-        <h2 id="name-prompt-title">{namePrompt.title}</h2>
-        <button class="icon-button" aria-label="Cancel" onclick={() => resolveNamePrompt(null)}
-          ><X /></button
-        >
-      </header>
-      <form
-        class="name-prompt-form"
-        onsubmit={(event) => {
-          event.preventDefault();
-          resolveNamePrompt(namePrompt?.value ?? null);
-        }}
-      >
-        <label class="name-prompt-label" for="name-prompt-input">{namePrompt.label}</label>
-        <input
-          id="name-prompt-input"
-          class="name-prompt-input"
-          bind:this={namePromptInput}
-          bind:value={namePrompt.value}
-        />
-        <p class="settings-note">A .md extension is added automatically when omitted.</p>
-        <div class="modal-actions">
-          <button type="button" onclick={() => resolveNamePrompt(null)}>Cancel</button>
-          <button class="primary" type="submit" disabled={!namePrompt.value.trim()}>Save</button>
-        </div>
-      </form>
-    </dialog>
-  </div>
-{/if}
-
-{#if conflictOpen}
-  <div class="modal-backdrop">
-    <dialog
-      bind:this={conflictDialog}
-      class="settings-modal"
-      aria-modal="true"
-      aria-labelledby="conflict-title"
-      onkeydown={trapDialogFocus}
-      oncancel={(event) => {
-        event.preventDefault();
-        dismissConflictForTab(conflictTabId ?? '');
-      }}
-    >
-      <h2 id="conflict-title">File changed outside Tuxedo MD</h2>
-      <p>
-        {#if conflictTabId}
-          {@const conflictTab = tabs.find((item) => item.id === conflictTabId)}
-          {conflictTab
-            ? `"${conflictTab.name}" changed on disk. Autosave is paused to protect both versions.`
-            : 'Autosave is paused to protect both versions.'}
-        {:else}
-          Autosave is paused to protect both versions.
-        {/if}
-      </p>
-      <div class="modal-actions">
-        <button bind:this={conflictInitialFocus} onclick={() => resolveConflict('reload')}
-          >Reload disk version</button
-        ><button class="primary" onclick={() => resolveConflict('keep')}>Keep my version</button>
-      </div>
-    </dialog>
-  </div>
-{/if}
+<ConflictDialog
+  open={conflictOpen}
+  tabName={conflictTab?.name ?? null}
+  onresolve={(action) => void resolveConflict(action)}
+  ondismiss={() => dismissConflictForTab(conflictTabId ?? '')}
+/>
 
 {#if paletteOpen}
   <CommandPalette commands={commandPaletteItems()} onclose={() => (paletteOpen = false)} />

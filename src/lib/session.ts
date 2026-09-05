@@ -1,15 +1,16 @@
-import type {
-  DocumentFingerprint,
-  DocumentTab,
-  EditorMode,
-  FileDocument,
-  SessionState,
+import {
+  MAX_DOCUMENT_BYTES,
+  type DocumentFingerprint,
+  type DocumentTab,
+  type EditorMode,
+  type FileDocument,
+  type SessionState,
 } from './types';
 
-const MAX_TAB_CONTENT_CHARS = 16 * 1024 * 1024;
-const MAX_TAB_CONTENT_BYTES = 16 * 1024 * 1024;
-const MAX_SESSION_TABS = 64;
-const MAX_RECENT = 20;
+const MAX_TAB_CONTENT_CHARS = MAX_DOCUMENT_BYTES;
+const MAX_TAB_CONTENT_BYTES = MAX_DOCUMENT_BYTES;
+export const MAX_SESSION_TABS = 64;
+export const MAX_RECENT = 20;
 const utf8Encoder = new TextEncoder();
 
 function exceedsTabContentLimit(value: string): boolean {
@@ -141,30 +142,51 @@ export function normalizeSessionState(raw: unknown): SessionState | null {
   };
 }
 
+/** Normalize a file path for comparison (slash, case, UNC, extended prefix, URI schemes). */
+export function normalizeFilePath(value: string): string {
+  let path = value.trim();
+  const hadBackslash = path.includes('\\');
+  // Strip file:// / file:/// so dialog vs session URIs match.
+  if (path.toLowerCase().startsWith('file:///')) path = path.slice('file:///'.length);
+  else if (path.toLowerCase().startsWith('file://')) path = path.slice('file://'.length);
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // Malformed URI percent-encoding kept as-is
+  }
+  path = path.replace(/\\/g, '/');
+  // \\?\UNC\server\share\... and //?/UNC/server/... → //server/...
+  path = path.replace(/^\/\/\?\/UNC\//i, '//');
+  // Strip remaining Windows extended-length prefix (\\?\C:\...).
+  path = path.replace(/^\/\/\?\//i, '');
+  path = path.replace(/^\/\?\//i, '');
+  const isWindows = /^[A-Za-z]:\//.test(path) || path.startsWith('//') || hadBackslash;
+  const isMac = typeof navigator !== 'undefined' && /Macintosh/i.test(navigator.userAgent);
+  if (isWindows || isMac) {
+    path = path.toLowerCase();
+  }
+  while (path.endsWith('/') && path.length > 1) path = path.slice(0, -1);
+  return path;
+}
+
 /** Compare file paths with basic canonicalization (slash/case/UNC/extended-prefix). */
 export function pathsReferToSameFile(
   left: string | null | undefined,
   right: string | null | undefined
 ): boolean {
   if (!left || !right) return false;
-  const normalize = (value: string) => {
-    let path = value.trim();
-    // Strip file:// / file:/// so dialog vs session URIs match.
-    if (path.toLowerCase().startsWith('file:///')) path = path.slice('file:///'.length);
-    else if (path.toLowerCase().startsWith('file://')) path = path.slice('file://'.length);
-    path = path.replace(/\\/g, '/');
-    // \\?\UNC\server\share\... and //?/UNC/server/... → //server/...
-    path = path.replace(/^\/\/\?\/UNC\//i, '//');
-    // Strip remaining Windows extended-length prefix (\\?\C:\...).
-    path = path.replace(/^\/\/\?\//i, '');
-    path = path.replace(/^\/\?\//i, '');
-    if (/^[A-Za-z]:\//.test(path) || path.startsWith('//') || !path.startsWith('/')) {
-      path = path.toLowerCase();
-    }
-    while (path.endsWith('/') && path.length > 1) path = path.slice(0, -1);
-    return path;
-  };
-  return normalize(left) === normalize(right);
+  return normalizeFilePath(left) === normalizeFilePath(right);
+}
+
+/** Check if a file path resides within a workspace directory. */
+export function isPathUnderWorkspace(
+  filePath: string | null | undefined,
+  workspaceRoot: string | null | undefined
+): boolean {
+  if (!filePath || !workspaceRoot) return false;
+  const normFile = normalizeFilePath(filePath);
+  const normRoot = normalizeFilePath(workspaceRoot);
+  return normFile.startsWith(`${normRoot}/`);
 }
 
 /** Drop bodies for path-backed clean tabs so session JSON stays small. */

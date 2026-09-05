@@ -1,6 +1,7 @@
 <script lang="ts">
   import { Search, X } from '@lucide/svelte';
   import { onMount, tick } from 'svelte';
+  import { focusedElement, restoreFocus, trapDialogFocus } from '../focus';
   import { formatShortcut } from '../shortcuts';
 
   type CommandPaletteItem = {
@@ -43,19 +44,11 @@
   let selectedCommand = $derived(filteredCommands[selectedIndex] ?? null);
 
   onMount(() => {
-    returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    returnFocus = focusedElement();
     void tick().then(() => searchInput?.focus());
 
     return () => {
-      const target = returnFocus;
-      if (!target?.isConnected) return;
-      let node: HTMLElement | null = target;
-      while (node) {
-        const style = getComputedStyle(node);
-        if (style.display === 'none' || style.visibility === 'hidden') return;
-        node = node.parentElement;
-      }
-      queueMicrotask(() => target.focus());
+      restoreFocus(returnFocus);
     };
   });
 
@@ -64,11 +57,12 @@
     if (!selected) return;
     document
       .getElementById(`command-palette-option-${selected.id}`)
-      ?.scrollIntoView({ block: 'nearest' });
+      ?.scrollIntoView?.({ block: 'nearest' });
   }
 
   function updateQuery(event: Event) {
-    query = (event.currentTarget as HTMLInputElement).value;
+    const input = (event.currentTarget ?? event.target) as HTMLInputElement | null;
+    query = input?.value ?? '';
     selectedIndex = 0;
     void tick().then(revealSelected);
   }
@@ -87,29 +81,6 @@
     command.run();
   }
 
-  function trapFocus(event: KeyboardEvent) {
-    if (event.key !== 'Tab' || !(event.currentTarget instanceof HTMLDialogElement)) return;
-    const focusable = Array.from(
-      event.currentTarget.querySelectorAll<HTMLElement>(
-        'button:not(:disabled), input:not(:disabled), [href], [tabindex]:not([tabindex="-1"])'
-      )
-    );
-    if (!focusable.length) {
-      event.preventDefault();
-      return;
-    }
-
-    const first = focusable[0];
-    const last = focusable.at(-1)!;
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }
-
   function handleDialogKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -117,7 +88,9 @@
       onclose();
       return;
     }
-    trapFocus(event);
+    if (event.currentTarget instanceof HTMLDialogElement) {
+      trapDialogFocus(event);
+    }
   }
 
   function handleSearchKeydown(event: KeyboardEvent) {

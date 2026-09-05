@@ -9,6 +9,24 @@ export function isAppClosing(): boolean {
   return closePhase !== 'idle';
 }
 
+export const CLOSE_FLUSH_TIMEOUT_MS = 10_000;
+
+function withTimeout(promise: Promise<void>, ms: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`beforeClose timed out after ${ms}ms`)), ms);
+    promise.then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 /**
  * Quit after optional recovery flush. Dirty buffers are draft-saved by the caller —
  * no confirm dialog on window close (Notepad++-style).
@@ -16,11 +34,16 @@ export function isAppClosing(): boolean {
  * CloseRequested stays intercepted through flush+destroy so a second native close
  * cannot skip the draft write.
  */
-export async function requestAppClose(beforeClose?: () => Promise<void>): Promise<void> {
+export async function requestAppClose(
+  beforeClose?: () => Promise<void>,
+  timeoutMs = CLOSE_FLUSH_TIMEOUT_MS
+): Promise<void> {
   if (closePhase !== 'idle') return;
   closePhase = 'flushing';
   try {
-    await beforeClose?.();
+    if (beforeClose) {
+      await withTimeout(beforeClose(), timeoutMs);
+    }
     closePhase = 'destroying';
     await getCurrentWindow().destroy();
   } catch (error) {

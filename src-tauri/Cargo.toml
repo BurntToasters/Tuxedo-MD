@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-blake3 = { version = "1", features = ["pure"] }
+blake3 = "1"
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
@@ -47,5 +47,6 @@ mas = []
 minisign-verify = "0.2.5"
 
 [profile.release]
-codegen-units = 16
-lto = "thin"
+codegen-units = 1
+lto = true
+strip = "symbols"
