@@ -7,6 +7,7 @@ export default defineConfig({
     conditions: ['browser'],
   },
   test: {
+    execArgv: Number(process.versions.node.split('.')[0]) >= 25 ? ['--no-webstorage'] : [],
     environment: 'jsdom',
     setupFiles: ['./src/tests/setup.ts'],
     include: ['src/tests/**/*.test.ts'],

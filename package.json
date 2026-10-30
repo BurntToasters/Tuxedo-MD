@@ -2,7 +2,7 @@
   "name": "tuxedomd",
   "version": "0.1.0-alpha.1",
   "private": true,
-  "packageManager": "npm@12.0.2",
+  "packageManager": "npm@12.2.1",
   "type": "module",
   "description": "A sleek, local-first Markdown editor for Windows, macOS, and Linux.",
   "license": "MPL-2.0",
@@ -12,8 +12,8 @@
     "url": "git+https://github.com/BurntToasters/Tuxedo-MD.git"
   },
   "engines": {
-    "node": "^22.22.2 || ^24.15.0 || >=26.0.0",
-    "npm": ">=12.0.1"
+    "node": "^24.22.1 || >=26.13.0",
+    "npm": ">=12.2.1"
   },
   "scripts": {
     "dev": "vite",
