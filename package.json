@@ -138,7 +138,7 @@
     "release:linux": "npm run prerelease:prepare && npm run release:prepare && npm run release:linux:continue",
     "release:linux:resume": "npm run prerelease:prepare && npm run release:linux:continue",
     "release:linux:x64": "npm run release:linux",
-    "setup:deb": "sudo apt update && sudo apt install -y build-essential curl wget file libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libglib2.0-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm && rustup toolchain install 1.97.1 --profile minimal && rustup default 1.97.1",
+    "setup:deb": "sudo apt update && sudo apt install -y build-essential curl wget file libgtk-3-dev libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libglib2.0-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm && rustup toolchain install 1.99.1 --profile minimal && rustup default 1.99.1",
     "gitprune": "node scripts/git-prune-local-branches.js",
     "gitprune:dry": "node scripts/git-prune-local-branches.js --dry-run",
     "gitprune:force": "node scripts/git-prune-local-branches.js --force"

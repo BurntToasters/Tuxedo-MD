@@ -11,7 +11,7 @@ permissions:
 env:
   NODE_VERSION: '26.13.0'
   NPM_VERSION: '12.2.1'
-  RUST_VERSION: '1.97.1'
+  RUST_VERSION: '1.99.1'
 
 jobs:
   quality:
