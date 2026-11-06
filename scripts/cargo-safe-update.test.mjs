@@ -1582,6 +1582,7 @@ test('56. rust setup arguments and scripts derive from the single pin', () => {
     setDefault: true,
     targets: ['foo'],
     help: false,
+    print: false,
   });
   assert.throws(() => parseCliArguments(['--target']), /requires a target triple/);
 
@@ -1602,4 +1603,28 @@ test('56. rust setup arguments and scripts derive from the single pin', () => {
   assert.doesNotMatch(ci, /RUST_VERSION/u);
   assert.equal(ci.match(/id: rust-pin/gu)?.length, 3);
   assert.equal(ci.match(/steps\.rust-pin\.outputs\.channel/gu)?.length, 3);
+});
+
+test('57. rust toolchain CLI --print matches the bare pin and never combines with an action', () => {
+  const script = fileURLToPath(new URL('./rust-toolchain.mjs', import.meta.url));
+  const run = (args) =>
+    spawnSync(process.execPath, [script, ...args], { encoding: 'utf8' });
+  const bare = run([]);
+  assert.equal(bare.status, 0, bare.stderr);
+  assert.match(bare.stdout, /^\d+\.\d+\.\d+\n$/u);
+  const printed = run(['--print']);
+  assert.equal(printed.status, 0, printed.stderr);
+  assert.equal(printed.stdout, bare.stdout);
+  for (const args of [
+    ['--print', '--install'],
+    ['--install', '--print'],
+    ['--print', '--target', 'x86_64-pc-windows-msvc'],
+    ['--target', 'x86_64-pc-windows-msvc', '--print'],
+  ]) {
+    const result = run(args);
+    const label = args.join(' ');
+    assert.notEqual(result.status, 0, `${label} must fail`);
+    assert.match(result.stderr, /--print cannot be combined/u, `${label} must name --print`);
+    assert.equal(result.stdout, '', `${label} must not print or act`);
+  }
 });

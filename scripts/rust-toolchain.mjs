@@ -160,7 +160,7 @@ function run(command, args) {
 }
 
 export function parseCliArguments(argv) {
-  const options = { install: false, setDefault: false, targets: [], help: false };
+  const options = { install: false, setDefault: false, targets: [], help: false, print: false };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--install') {
@@ -174,11 +174,16 @@ export function parseCliArguments(argv) {
       }
       options.targets.push(target);
       index += 1;
+    } else if (argument === '--print') {
+      options.print = true;
     } else if (argument === '--help' || argument === '-h') {
       options.help = true;
     } else {
       throw new Error(`Unknown argument: ${argument}`);
     }
+  }
+  if (options.print && (options.install || options.setDefault || options.targets.length > 0)) {
+    throw new Error('--print cannot be combined with an action');
   }
   return options;
 }
@@ -189,7 +194,8 @@ function printUsage() {
 With no options, prints the channel pinned in rust-toolchain.toml.
 
 Options:
-  --install         Install the pinned toolchain, profile, and components
+  --print           Print the pinned channel (same as no options)
+  --install       Install the pinned toolchain, profile, and components
   --target TRIPLE   Add a target to the pinned toolchain (repeatable)
   --default         Set the pinned toolchain as the rustup default
   --help, -h        Show this help`);
