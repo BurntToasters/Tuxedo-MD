@@ -11,7 +11,6 @@ permissions:
 env:
   NODE_VERSION: '26.13.0'
   NPM_VERSION: '12.2.1'
-  RUST_VERSION: '1.99.1'
 
 jobs:
   quality:
@@ -27,9 +26,15 @@ jobs:
           cache: npm
       - name: Install latest npm 12
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+      - name: Read Rust pin
+        id: rust-pin
+        shell: bash
+        run: |
+          channel="$(node scripts/rust-toolchain.mjs)"
+          printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.channel }}
           components: clippy, rustfmt
       - name: Install system deps
         run: |
@@ -53,9 +58,15 @@ jobs:
           cache: npm
       - name: Install latest npm 12
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+      - name: Read Rust pin
+        id: rust-pin
+        shell: bash
+        run: |
+          channel="$(node scripts/rust-toolchain.mjs)"
+          printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.channel }}
           components: clippy, rustfmt
       - run: npm ci --ignore-scripts
       - run: npm audit signatures
@@ -77,9 +88,15 @@ jobs:
           cache: npm
       - name: Install latest npm 12
         run: npm install --global npm@${{ env.NPM_VERSION }} --ignore-scripts --min-release-age=3
+      - name: Read Rust pin
+        id: rust-pin
+        shell: bash
+        run: |
+          channel="$(node scripts/rust-toolchain.mjs)"
+          printf 'channel=%s\n' "$channel" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
-          toolchain: ${{ env.RUST_VERSION }}
+          toolchain: ${{ steps.rust-pin.outputs.channel }}
           components: clippy, rustfmt
       - run: npm ci --ignore-scripts
       - run: npm audit signatures
@@ -87,4 +104,3 @@ jobs:
       - run: npm test
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --all-targets
       - run: cargo check --locked --manifest-path src-tauri/Cargo.toml --features mas
-

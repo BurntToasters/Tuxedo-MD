@@ -34,7 +34,6 @@ import {
 } from './cargo-safe-update.mjs';
 import {
   MINIMUM_NPM_VERSION,
-  PINNED_RUST_VERSION,
   commandRequiresShell,
   hasPinnedRustToolchain,
   isSupportedNodeVersion,
@@ -43,6 +42,16 @@ import {
   parseVersion,
   restoreSnapshot,
 } from './npm-safe-update.mjs';
+import {
+  RUST_TOOLCHAIN_FILE,
+  parseCliArguments,
+  readPinnedRustToolchain,
+  rustupDefaultArguments,
+  rustupInstallArguments,
+  rustupTargetArguments,
+} from './rust-toolchain.mjs';
+
+const PINNED_RUST_VERSION = readPinnedRustToolchain().channel;
 
 // Skip real Cargo integration tests if SKIP_CARGO_INTEGRATION=1
 const SKIP_CARGO_INTEGRATION = process.env.SKIP_CARGO_INTEGRATION === '1';
@@ -1465,4 +1474,127 @@ test('51. npm rollback refuses to overwrite a concurrent package-lock edit', () 
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }
+});
+
+test('52. rust pin is read from rust-toolchain.toml with components and profile', () => {
+  const config = readPinnedRustToolchain();
+  assert.equal(
+    RUST_TOOLCHAIN_FILE,
+    fileURLToPath(new URL('../rust-toolchain.toml', import.meta.url))
+  );
+  assert.equal(config.channel, PINNED_RUST_VERSION);
+  assert.ok(config.channel.length > 0);
+  assert.equal(config.profile, 'minimal');
+  assert.deepEqual(config.components, ['clippy', 'rustfmt']);
+});
+
+test('53. rust pin parser handles CRLF, comments, stable channels, and trailing commas', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'rust-toolchain-crlf-'));
+  try {
+    const toolchainFile = path.join(tempDir, 'rust-toolchain.toml');
+    writeFileSync(
+      toolchainFile,
+      '\uFEFF# pinned\r\n[toolchain]\r\nchannel = "stable" # channel\r\n' +
+        'profile = "minimal"\r\ncomponents = ["clippy", "rustfmt",]\r\n'
+    );
+    assert.deepEqual(readPinnedRustToolchain(toolchainFile), {
+      channel: 'stable',
+      profile: 'minimal',
+      components: ['clippy', 'rustfmt'],
+    });
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('54. rust pin parser fails closed for missing and malformed pins', () => {
+  const tempDir = mkdtempSync(path.join(os.tmpdir(), 'rust-toolchain-invalid-'));
+  try {
+    const cases = [
+      ['channel = "1.2.3"\n', /missing \[toolchain\]/],
+      ['[toolchain]\nprofile = "minimal"\n', /missing channel/],
+      ['[toolchain]\nchannel = ""\n', /empty channel/],
+      ['[toolchain]\nchannel = "1.2.3\n', /Malformed/],
+      ['[toolchain]\nchannel = "1.2.3"\nchannel = "1.2.4"\n', /duplicate channel/],
+    ];
+    for (const [index, [content, pattern]] of cases.entries()) {
+      const toolchainFile = path.join(tempDir, `case-${index}.toml`);
+      writeFileSync(toolchainFile, content);
+      assert.throws(() => readPinnedRustToolchain(toolchainFile), pattern);
+    }
+    assert.throws(
+      () => readPinnedRustToolchain(path.join(tempDir, 'absent.toml')),
+      /not found/
+    );
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('55. rust toolchain CLI prints one pin line and rejects unknown arguments', () => {
+  const script = fileURLToPath(new URL('./rust-toolchain.mjs', import.meta.url));
+  const result = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, `${PINNED_RUST_VERSION}\n`);
+  assert.equal(result.stdout.trim().split(/\r?\n/u).length, 1);
+
+  const unknown = spawnSync(process.execPath, [script, '--bogus'], { encoding: 'utf8' });
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /Unknown argument/);
+});
+
+test('56. rust setup arguments and scripts derive from the single pin', () => {
+  const config = {
+    channel: PINNED_RUST_VERSION,
+    profile: 'minimal',
+    components: ['clippy', 'rustfmt'],
+  };
+  assert.deepEqual(rustupInstallArguments(config), [
+    'toolchain',
+    'install',
+    PINNED_RUST_VERSION,
+    '--profile',
+    'minimal',
+    '--component',
+    'clippy',
+    '--component',
+    'rustfmt',
+  ]);
+  assert.deepEqual(rustupDefaultArguments(config), ['default', PINNED_RUST_VERSION]);
+  assert.deepEqual(
+    rustupTargetArguments(config, ['x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc']),
+    [
+      'target',
+      'add',
+      'x86_64-pc-windows-msvc',
+      'aarch64-pc-windows-msvc',
+      '--toolchain',
+      PINNED_RUST_VERSION,
+    ]
+  );
+  assert.deepEqual(parseCliArguments(['--install', '--default', '--target', 'foo']), {
+    install: true,
+    setDefault: true,
+    targets: ['foo'],
+    help: false,
+  });
+  assert.throws(() => parseCliArguments(['--target']), /requires a target triple/);
+
+  const packageJsonText = readFileSync(new URL('../package.json', import.meta.url), 'utf8');
+  const packaging = JSON.parse(packageJsonText);
+  for (const [name, command] of Object.entries(packaging.scripts)) {
+    if (name.startsWith('rust:')) {
+      assert.match(command, /node scripts\/rust-toolchain\.mjs|npm run rust:/u, name);
+    }
+  }
+  assert.match(
+    packaging.scripts['setup:deb'],
+    /node scripts\/rust-toolchain\.mjs --install --default/u
+  );
+  assert.doesNotMatch(packageJsonText, /rustup (?:toolchain install|default|target add)/u);
+
+  const ci = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  assert.doesNotMatch(ci, /RUST_VERSION/u);
+  assert.equal(ci.match(/id: rust-pin/gu)?.length, 3);
+  assert.equal(ci.match(/steps\.rust-pin\.outputs\.channel/gu)?.length, 3);
 });
