@@ -10,6 +10,8 @@ export const RUST_TOOLCHAIN_FILE = fileURLToPath(
   new URL('../rust-toolchain.toml', import.meta.url)
 );
 
+const EXACT_RUST_VERSION = /^\d+\.\d+\.\d+$/u;
+
 function malformed(filePath, line, detail) {
   return new Error(`Malformed rust-toolchain.toml at ${filePath}: ${detail} (line: ${line})`);
 }
@@ -112,6 +114,11 @@ export function readPinnedRustToolchain(filePath = RUST_TOOLCHAIN_FILE) {
   }
   if (channel === undefined) {
     throw new Error(`Malformed rust-toolchain.toml at ${filePath}: missing channel`);
+  }
+  if (!EXACT_RUST_VERSION.test(channel)) {
+    throw new Error(
+      `Malformed rust-toolchain.toml at ${filePath}: must pin an exact Rust version; found ${channel}`
+    );
   }
 
   return {

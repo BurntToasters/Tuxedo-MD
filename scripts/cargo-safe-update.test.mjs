@@ -1488,17 +1488,17 @@ test('52. rust pin is read from rust-toolchain.toml with components and profile'
   assert.deepEqual(config.components, ['clippy', 'rustfmt']);
 });
 
-test('53. rust pin parser handles CRLF, comments, stable channels, and trailing commas', () => {
+test('53. rust pin parser handles CRLF, comments, and trailing commas', () => {
   const tempDir = mkdtempSync(path.join(os.tmpdir(), 'rust-toolchain-crlf-'));
   try {
     const toolchainFile = path.join(tempDir, 'rust-toolchain.toml');
     writeFileSync(
       toolchainFile,
-      '\uFEFF# pinned\r\n[toolchain]\r\nchannel = "stable" # channel\r\n' +
+      '\uFEFF# pinned\r\n[toolchain]\r\nchannel = "1.2.3" # channel\r\n' +
         'profile = "minimal"\r\ncomponents = ["clippy", "rustfmt",]\r\n'
     );
     assert.deepEqual(readPinnedRustToolchain(toolchainFile), {
-      channel: 'stable',
+      channel: '1.2.3',
       profile: 'minimal',
       components: ['clippy', 'rustfmt'],
     });
@@ -1516,6 +1516,11 @@ test('54. rust pin parser fails closed for missing and malformed pins', () => {
       ['[toolchain]\nchannel = ""\n', /empty channel/],
       ['[toolchain]\nchannel = "1.2.3\n', /Malformed/],
       ['[toolchain]\nchannel = "1.2.3"\nchannel = "1.2.4"\n', /duplicate channel/],
+      ['[toolchain]\nchannel = "stable"\n', /must pin an exact Rust version; found stable/],
+      ['[toolchain]\nchannel = "nightly"\n', /must pin an exact Rust version/],
+      ['[toolchain]\nchannel = "1.2"\n', /must pin an exact Rust version; found 1\.2/],
+      ['[toolchain]\nchannel = "1.2.3-x86_64-pc-windows-msvc"\n', /must pin an exact Rust version/],
+      ['[toolchain]\nchannel = "nightly-2026-01-01"\n', /must pin an exact Rust version/],
     ];
     for (const [index, [content, pattern]] of cases.entries()) {
       const toolchainFile = path.join(tempDir, `case-${index}.toml`);
