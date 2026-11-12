@@ -4,9 +4,13 @@ description = "Enables all Tuxedo MD application invoke commands."
 commands.allow = [
   "open_document",
   "save_document",
+  "export_html",
+  "read_theme_file",
+  "write_theme_file",
   "scan_workspace",
   "adopt_workspace_folder",
   "search_workspace",
+  "read_preview_image",
   "collect_workspace_references",
   "create_workspace_document",
   "rename_workspace_document",

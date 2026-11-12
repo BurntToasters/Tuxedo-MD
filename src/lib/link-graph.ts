@@ -14,6 +14,8 @@ export interface LinkGraph {
   broken: BrokenLink[];
   /** Documents nothing else links to. */
   orphans: string[];
+  /** Notes with neither an ATX heading nor a non-empty frontmatter title. */
+  untitled: string[];
   /** Tag name -> documents carrying it. */
   tags: Record<string, string[]>;
 }
@@ -141,7 +143,7 @@ function resolveWithIndex(
 
 /**
  * Builds the workspace link graph: outbound links, backlinks, unresolved local
- * links, documents nothing links to, and the tag index.
+ * links, documents nothing links to, notes without a title, and the tag index.
  */
 export function buildLinkGraph(documents: DocumentReferences[]): LinkGraph {
   const index = buildIndex(documents);
@@ -186,7 +188,16 @@ export function buildLinkGraph(documents: DocumentReferences[]): LinkGraph {
     .filter((path) => backlinks[path].length === 0)
     .sort((a, b) => a.localeCompare(b));
 
-  return { outbound, backlinks, broken, orphans, tags };
+  // Omitted hasTitle is unknown, not missing. Only an explicit false is untitled.
+  const untitled = [
+    ...new Set(
+      documents
+        .filter((document) => document.hasTitle === false)
+        .map((document) => normalizeSeparators(document.relativePath))
+    ),
+  ].sort((a, b) => a.localeCompare(b));
+
+  return { outbound, backlinks, broken, orphans, untitled, tags };
 }
 
 /** Tags ordered by document count, then name, for a stable sidebar listing. */

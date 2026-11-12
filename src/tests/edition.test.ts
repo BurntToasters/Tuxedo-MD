@@ -31,15 +31,16 @@ describe('edition subsystem', () => {
     delete (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   });
 
-  it('provides capability messaging for shipped and unshipped capabilities', () => {
+  it('provides capability messaging for enabled and gated capabilities', () => {
     applySafeFallback(new Error('test'));
     expect(hasCapability('workspaceSearch')).toBe(false);
 
     const communityMsg = capabilityMessage('workspaceSearch');
     expect(communityMsg).toContain('available in Tuxedo MD Pro');
 
-    const unshippedMsg = capabilityMessage('mermaid');
-    expect(unshippedMsg).toContain('planned for a future Tuxedo MD Pro release');
+    const gatedMsg = capabilityMessage('documentRecipes');
+    expect(gatedMsg).toContain('available in Tuxedo MD Pro');
+    expect(gatedMsg).toContain('Community continues to include complete local Markdown editing.');
 
     applyBuildInfo({
       edition: 'full',

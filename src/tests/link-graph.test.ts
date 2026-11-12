@@ -85,6 +85,16 @@ describe('buildLinkGraph', () => {
     expect(graph.orphans).toEqual(['index.md']);
   });
 
+  it('lists only documents that explicitly have no title', () => {
+    const graph = buildLinkGraph([
+      { ...doc('notes\\bare.md'), hasTitle: false },
+      { ...doc('zeta.md'), hasTitle: false },
+      { ...doc('notes/named.md'), hasTitle: true },
+      doc('notes/quiet.md'),
+    ]);
+    expect(graph.untitled).toEqual(['notes/bare.md', 'zeta.md']);
+  });
+
   it('does not treat a self-link as a backlink', () => {
     const graph = buildLinkGraph([doc('index.md', ['index.md'])]);
     expect(graph.outbound['index.md']).toEqual([]);

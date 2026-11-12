@@ -18,11 +18,48 @@
   import StatusBar from './lib/chrome/StatusBar.svelte';
   import SettingsDialog from './lib/chrome/SettingsDialog.svelte';
   import NamePromptDialog from './lib/chrome/NamePromptDialog.svelte';
+  import ExportDialog from './lib/chrome/ExportDialog.svelte';
+  import FocusTimer from './lib/chrome/FocusTimer.svelte';
+  import RecipeDialog from './lib/chrome/RecipeDialog.svelte';
+  import ThemeStudio from './lib/chrome/ThemeStudio.svelte';
   import ConflictDialog from './lib/chrome/ConflictDialog.svelte';
   import { focusedElement, restoreFocus } from './lib/focus';
   import { capabilityMessage, editionState, hasCapability, requireCapability } from './lib/edition';
   import { setDraftIndexed as writeDraftIndex } from './lib/draft-index';
-  import { renderMarkdown } from './lib/preview';
+  import { nearestHeadingAtOrBefore, parseMarkdownHeadings } from './lib/headings';
+  import { renderMarkdown, rewritePreviewImages } from './lib/preview';
+  import {
+    EXPORT_PROFILE_KEY,
+    buildExportDocument,
+    defaultExportProfile,
+    htmlExportDefaultPath,
+    htmlFileNameForDocument,
+    normalizeExportProfile,
+    printExportHtml,
+    type ExportProfile,
+  } from './lib/export-document';
+  import {
+    THEME_PACKAGE_KEY,
+    normalizeThemePackage,
+    serializeThemePackage,
+    themePackageFileName,
+    type ThemePackage,
+  } from './lib/theme-package';
+  import {
+    DOCUMENT_RECIPES_KEY,
+    composeRecipeMarkdown,
+    normalizeDocumentRecipes,
+    recipeFileName,
+    type DocumentRecipe,
+  } from './lib/document-recipes';
+  import {
+    FOCUS_PRESETS_KEY,
+    focusTimerReading,
+    formatFocusRemaining,
+    normalizeFocusPreset,
+    normalizeFocusPresets,
+    type FocusPreset,
+  } from './lib/focus-presets';
   import {
     hydrateSessionTabs,
     isPathUnderWorkspace,
@@ -39,11 +76,18 @@
   import { isTabDirty, neutralizeDiscardedTab } from './lib/tab-lifecycle';
   import {
     chooseDocument,
+    chooseExportHtmlPath,
     chooseSavePath,
+    chooseThemeOpenPath,
+    chooseThemeSavePath,
     chooseWorkspace,
     isDesktop,
     readDocument,
+    readPreviewImage,
+    readThemeFile,
+    exportHtml,
     writeDocument,
+    writeThemeFile,
     probeDocument,
     probeDocumentMeta,
     loadState,
@@ -77,7 +121,7 @@
     type FlatWorkspaceNode,
   } from './lib/workspace-tree';
   import { resizeWindowForDrawer } from './lib/window';
-  import { syncAppearanceEffects } from './lib/appearance';
+  import { applyThemePackage, clearThemePackage, syncAppearanceEffects } from './lib/appearance';
   import { detectPlatform, usesCustomTitleBar, type AppPlatform } from './lib/platform';
   import { formatWindowTitle } from './lib/window-title';
   import {
@@ -132,6 +176,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   const canUseWikiLinks = hasCapability('wikiLinks');
   const canUseTags = hasCapability('tags');
   const canInspectWorkspace = hasCapability('workspaceIntelligence');
+  const canRenderMermaid = hasCapability('mermaid');
+  const canRenderMath = hasCapability('math');
   const showReferencePanel =
     canUseBacklinks || canUseTags || canInspectWorkspace || canUseWikiLinks;
   let tabs = $state<DocumentTab[]>([initialTab]);
@@ -143,6 +189,8 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let isMacChrome = $derived(appPlatform === 'macos');
   let findRequest = $state(0);
   let preview = $state('');
+  let previewDocumentId = $state('');
+  let previewPane = $state<HTMLDivElement | null>(null);
   let sidebarOpen = $state(false);
   let drawerOverlay = $state(false);
   let drawerPanel = $state<DrawerPanel>('files');
@@ -150,7 +198,16 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let workspaceFiles = $state<WorkspaceEntry[]>([]);
   // SvelteSet is reactive on its own, so this instance is mutated rather than replaced.
   const expandedDirectories = new SvelteSet<string>();
-  let revealRequest = $state<{ line: number; token: number } | null>(null);
+  let revealRequest = $state<{
+    line: number;
+    token: number;
+    focus?: boolean;
+    align?: 'start' | 'center';
+  } | null>(null);
+  let editorViewportLine = 0;
+  let scrollSyncKey = '';
+  let scrollSyncOrigin: 'editor' | 'preview' | null = null;
+  let scrollSyncTimer: ReturnType<typeof setTimeout> | undefined;
   let filter = $state('');
   let searchQuery = $state('');
   let searchCaseSensitive = $state(false);
@@ -167,6 +224,61 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let status = $state('Ready');
   let settings = $state<AppSettings>(defaultSettings);
   let settingsOpen = $state(false);
+  let exportOpen = $state(false);
+  let exportBusy = $state(false);
+  let exportProfile = $state<ExportProfile>({ ...defaultExportProfile });
+  let themeOpen = $state(false);
+  let themePackage = $state<ThemePackage | null>(null);
+  let exportProfileWrite: Promise<void> = Promise.resolve();
+  let recipeOpen = $state(false);
+  let documentRecipes = $state<DocumentRecipe[]>([]);
+  let recipeWrite: Promise<void> = Promise.resolve();
+  let focusTimerOpen = $state(false);
+  let focusPresets = $state<FocusPreset[]>([]);
+  let focusPresetWrite: Promise<void> = Promise.resolve();
+  const focusClock = { elapsedMs: 0, anchor: 0 };
+  let focusActive = $state<FocusPreset | null>(null);
+  let focusRunning = $state(false);
+  let focusFinished = $state(false);
+  let focusNow = $state(0);
+  let recipeCreating = false;
+
+  let focusSessionView = $derived.by(() => {
+    if (!focusActive) return null;
+    const extra = focusRunning ? Math.max(0, focusNow - focusClock.anchor) : 0;
+    const reading = focusTimerReading(
+      focusActive.minutes,
+      Math.floor((focusClock.elapsedMs + extra) / 1000)
+    );
+    const finished = focusFinished || reading.finished;
+    return {
+      name: focusActive.name,
+      goal: focusActive.goal,
+      finished,
+      running: focusRunning && !finished,
+      remainingText: finished ? 'Finished' : formatFocusRemaining(reading.remainingSeconds),
+    };
+  });
+
+  $effect(() => {
+    if (!focusRunning) return;
+    const timer = setInterval(() => {
+      const active = focusActive;
+      const now = Date.now();
+      if (active) {
+        const elapsed = Math.floor(
+          (focusClock.elapsedMs + Math.max(0, now - focusClock.anchor)) / 1000
+        );
+        if (focusTimerReading(active.minutes, elapsed).finished) {
+          focusClock.elapsedMs = active.minutes * 60 * 1000;
+          focusFinished = true;
+          focusRunning = false;
+        }
+      }
+      focusNow = now;
+    }, 250);
+    return () => clearInterval(timer);
+  });
   let updatesSupported = $state(false);
   let previousUpdateChannel = $state<UpdateChannel>(defaultSettings.updateChannel);
 
@@ -229,29 +341,51 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       )
     )
   );
-  let outline = $derived.by(() => {
-    if (!sidebarOpen || drawerPanel !== 'outline') return [];
-    return (activeTab?.content ?? '')
-      .split('\n')
-      .map((line, index) => {
-        const match = /^(#{1,6})\s+(.+?)\s*#*$/.exec(line);
-        return match ? { level: match[1].length, title: match[2], line: index + 1 } : null;
-      })
-      .filter((item): item is { level: number; title: string; line: number } => item !== null);
+  let documentHeadings = $derived.by(() => {
+    if (mode !== 'split' && (!sidebarOpen || drawerPanel !== 'outline')) return [];
+    return parseMarkdownHeadings(activeTab?.content ?? '');
   });
+  let outline = $derived(sidebarOpen && drawerPanel === 'outline' ? documentHeadings : []);
 
   $effect(() => {
     const content = activeTab?.content ?? '';
+    const documentId = activeTab?.id ?? '';
+    const documentPath = activeTab?.path ?? null;
+    const desktop = isDesktop();
     const request = ++previewRenderRequest;
-    renderMarkdown(content)
+    renderMarkdown(content, { mermaid: canRenderMermaid, math: canRenderMath })
+      .then(async (html) => {
+        if (request !== previewRenderRequest) return null;
+        if (!documentPath || !desktop) return html;
+        return rewritePreviewImages(html, async (src) => {
+          try {
+            const image = await readPreviewImage(documentPath, src);
+            return `data:${image.mimeType};base64,${image.base64}`;
+          } catch {
+            return null;
+          }
+        });
+      })
       .then((html) => {
-        if (request === previewRenderRequest) preview = html;
+        if (html === null || request !== previewRenderRequest) return;
+        preview = html;
+        previewDocumentId = documentId;
       })
       .catch((error) => {
         if (request !== previewRenderRequest) return;
         preview = '';
+        previewDocumentId = documentId;
         status = `Preview failed: ${readableError(error)}`;
       });
+  });
+
+  $effect(() => {
+    if (mode !== 'split') {
+      clearScrollSyncHold();
+      return;
+    }
+    if (previewDocumentId !== activeId) return;
+    syncPreviewToEditorLine(editorViewportLine);
   });
 
   let windowEffectRequest = 0;
@@ -392,18 +526,34 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   let settingsReturnFocus: HTMLElement | null = null;
   let namePromptReturnFocus: HTMLElement | null = null;
   let conflictReturnFocus: HTMLElement | null = null;
+  let exportReturnFocus: HTMLElement | null = null;
+  let themeReturnFocus: HTMLElement | null = null;
+  let recipeReturnFocus: HTMLElement | null = null;
+  let focusTimerReturnFocus: HTMLElement | null = null;
 
   let conflictTab = $derived(
     conflictTabId ? (tabs.find((item) => item.id === conflictTabId) ?? null) : null
   );
 
   function openCommandPalette() {
-    if (settingsOpen || namePrompt || conflictOpen) return;
+    if (
+      settingsOpen ||
+      namePrompt ||
+      conflictOpen ||
+      exportOpen ||
+      themeOpen ||
+      recipeOpen ||
+      focusTimerOpen
+    ) {
+      return;
+    }
     paletteOpen = true;
   }
 
   function openSettings() {
-    if (namePrompt || conflictOpen) return;
+    if (namePrompt || conflictOpen || exportOpen || themeOpen || recipeOpen || focusTimerOpen) {
+      return;
+    }
     if (!settingsOpen) settingsReturnFocus = focusedElement();
     settingsOpen = true;
   }
@@ -414,6 +564,405 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     const target = settingsReturnFocus;
     settingsReturnFocus = null;
     restoreFocus(target);
+  }
+
+  function setExportProfile(next: ExportProfile) {
+    exportProfile = normalizeExportProfile(next);
+  }
+
+  function rememberExportProfile() {
+    const profile = normalizeExportProfile(exportProfile);
+    exportProfile = profile;
+    if (!isDesktop() || !persistenceReady) return;
+    exportProfileWrite = exportProfileWrite.then(async () => {
+      try {
+        await saveState(EXPORT_PROFILE_KEY, profile);
+      } catch (error) {
+        console.error('Failed to save export profile', error);
+      }
+    });
+  }
+
+  function openExportDialog() {
+    if (!hasCapability('exportProfiles')) {
+      status = capabilityMessage('exportProfiles');
+      return;
+    }
+    if (
+      exportOpen ||
+      settingsOpen ||
+      namePrompt ||
+      conflictOpen ||
+      themeOpen ||
+      recipeOpen ||
+      focusTimerOpen
+    ) {
+      return;
+    }
+    exportReturnFocus = focusedElement();
+    exportOpen = true;
+  }
+
+  function closeExportDialog() {
+    if (!exportOpen) return;
+    exportOpen = false;
+    const target = exportReturnFocus;
+    exportReturnFocus = null;
+    restoreFocus(target);
+    rememberExportProfile();
+  }
+
+  function openThemeStudio() {
+    if (!hasCapability('themeStudio')) {
+      status = capabilityMessage('themeStudio');
+      return;
+    }
+    if (
+      themeOpen ||
+      settingsOpen ||
+      namePrompt ||
+      conflictOpen ||
+      exportOpen ||
+      recipeOpen ||
+      focusTimerOpen
+    ) {
+      return;
+    }
+    themeReturnFocus = focusedElement();
+    themeOpen = true;
+  }
+
+  function closeThemeStudio() {
+    if (!themeOpen) return;
+    themeOpen = false;
+    const target = themeReturnFocus;
+    themeReturnFocus = null;
+    restoreFocus(target);
+  }
+
+  function rememberDocumentRecipes(next: DocumentRecipe[]) {
+    const recipes = normalizeDocumentRecipes(next);
+    documentRecipes = recipes;
+    if (!isDesktop() || !persistenceReady) return;
+    recipeWrite = recipeWrite.then(async () => {
+      try {
+        await saveState(DOCUMENT_RECIPES_KEY, recipes);
+      } catch (error) {
+        console.error('Failed to save document recipes', error);
+      }
+    });
+  }
+
+  function openRecipeDialog() {
+    if (!hasCapability('documentRecipes')) {
+      status = capabilityMessage('documentRecipes');
+      return;
+    }
+    if (
+      recipeOpen ||
+      settingsOpen ||
+      namePrompt ||
+      conflictOpen ||
+      exportOpen ||
+      themeOpen ||
+      focusTimerOpen
+    ) {
+      return;
+    }
+    recipeReturnFocus = focusedElement();
+    recipeOpen = true;
+  }
+
+  function closeRecipeDialog() {
+    if (!recipeOpen) return;
+    recipeOpen = false;
+    const target = recipeReturnFocus;
+    recipeReturnFocus = null;
+    restoreFocus(target);
+  }
+
+  async function createRecipeDocument(
+    recipe: DocumentRecipe,
+    documentName: string
+  ): Promise<string | null> {
+    if (!hasCapability('documentRecipes')) {
+      const message = capabilityMessage('documentRecipes');
+      status = message;
+      return message;
+    }
+    if (!workspaceRoot) {
+      const message = 'Open a workspace folder before creating documents';
+      status = message;
+      return message;
+    }
+    const fileName = recipeFileName(recipe.filenamePattern, documentName);
+    if (!fileName) {
+      const message = 'That name cannot be used for a Markdown file';
+      status = message;
+      return message;
+    }
+    if (recipeCreating) return null;
+    recipeCreating = true;
+    try {
+      await requireCapability('documentRecipes');
+      const entry = await createWorkspaceDocument(
+        workspaceRoot,
+        fileName,
+        composeRecipeMarkdown(recipe)
+      );
+      await refreshWorkspace();
+      await openWorkspaceFile(entry.path);
+      status = `Created ${entry.relativePath}`;
+      closeRecipeDialog();
+      return null;
+    } catch (error) {
+      const message = readableError(error);
+      status = message;
+      return message;
+    } finally {
+      recipeCreating = false;
+    }
+  }
+
+  function rememberFocusPresets(next: FocusPreset[]) {
+    const presets = normalizeFocusPresets(next);
+    focusPresets = presets;
+    if (!isDesktop() || !persistenceReady) return;
+    focusPresetWrite = focusPresetWrite.then(async () => {
+      try {
+        await saveState(FOCUS_PRESETS_KEY, presets);
+      } catch (error) {
+        console.error('Failed to save focus presets', error);
+      }
+    });
+  }
+
+  function openFocusTimer() {
+    if (!hasCapability('focusSessionPresets')) {
+      status = capabilityMessage('focusSessionPresets');
+      return;
+    }
+    if (
+      focusTimerOpen ||
+      settingsOpen ||
+      namePrompt ||
+      conflictOpen ||
+      exportOpen ||
+      themeOpen ||
+      recipeOpen
+    ) {
+      return;
+    }
+    focusTimerReturnFocus = focusedElement();
+    focusTimerOpen = true;
+  }
+
+  function closeFocusTimer() {
+    if (!focusTimerOpen) return;
+    focusTimerOpen = false;
+    const target = focusTimerReturnFocus;
+    focusTimerReturnFocus = null;
+    restoreFocus(target);
+  }
+
+  function beginFocusPreset(preset: FocusPreset): string | null {
+    if (!hasCapability('focusSessionPresets')) {
+      const message = capabilityMessage('focusSessionPresets');
+      status = message;
+      return message;
+    }
+    const normalized = normalizeFocusPreset(preset);
+    if (!normalized) {
+      const message = 'Minutes must be a whole number from 1 to 180';
+      status = message;
+      return message;
+    }
+    focusActive = normalized;
+    focusClock.elapsedMs = 0;
+    focusClock.anchor = Date.now();
+    focusFinished = false;
+    focusNow = focusClock.anchor;
+    focusRunning = true;
+    if (normalized.focusMode && !settings.focusMode) {
+      settings = { ...settings, focusMode: true };
+      void setSidebarOpen(false);
+      schedulePersistence();
+    } else if (normalized.focusMode) {
+      void setSidebarOpen(false);
+    }
+    closeFocusTimer();
+    return null;
+  }
+
+  function resumeOrRestartFocus() {
+    if (!focusActive) return;
+    if (focusFinished) {
+      beginFocusPreset(focusActive);
+      return;
+    }
+    if (focusRunning) return;
+    if (!hasCapability('focusSessionPresets')) {
+      status = capabilityMessage('focusSessionPresets');
+      return;
+    }
+    focusClock.anchor = Date.now();
+    focusNow = focusClock.anchor;
+    focusRunning = true;
+  }
+
+  function pauseFocusTimer() {
+    if (!focusRunning || !focusActive) return;
+    focusClock.elapsedMs += Math.max(0, Date.now() - focusClock.anchor);
+    focusRunning = false;
+    focusNow = Date.now();
+  }
+
+  function stopFocusTimer() {
+    focusRunning = false;
+    focusFinished = false;
+    focusClock.elapsedMs = 0;
+    focusActive = null;
+    focusNow = Date.now();
+  }
+
+  async function saveThemePackage(raw: ThemePackage) {
+    try {
+      await requireCapability('themeStudio');
+      const pkg = normalizeThemePackage(raw);
+      if (!pkg) {
+        status = 'Theme package is not valid';
+        return;
+      }
+      if (isDesktop()) await saveState(THEME_PACKAGE_KEY, pkg);
+      applyThemePackage(pkg);
+      themePackage = pkg;
+      status = isDesktop() ? `Saved theme ${pkg.name}` : `Applied theme ${pkg.name}`;
+    } catch (error) {
+      status = readableError(error);
+    }
+  }
+
+  async function resetThemePackage() {
+    try {
+      await requireCapability('themeStudio');
+      clearThemePackage();
+      themePackage = null;
+      if (isDesktop()) await deleteState(THEME_PACKAGE_KEY);
+      status = 'Theme reset';
+    } catch (error) {
+      status = readableError(error);
+      throw error;
+    }
+  }
+
+  async function importThemePackage(): Promise<ThemePackage | null> {
+    try {
+      await requireCapability('themeStudio');
+      if (!isDesktop()) {
+        status = 'Native file dialogs are available in the desktop app';
+        return null;
+      }
+      const path = await chooseThemeOpenPath();
+      if (!path) return null;
+      const text = await readThemeFile(path);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        status = 'That theme file is not valid JSON';
+        return null;
+      }
+      const pkg = normalizeThemePackage(parsed);
+      if (!pkg) {
+        status = 'That theme file is not a valid theme package';
+        return null;
+      }
+      status = `Imported ${pkg.name}`;
+      return pkg;
+    } catch (error) {
+      status = readableError(error);
+      return null;
+    }
+  }
+
+  async function exportThemePackage(pkg: ThemePackage) {
+    try {
+      await requireCapability('themeStudio');
+      if (!isDesktop()) {
+        status = 'Native saving is available in the desktop app';
+        return;
+      }
+      const path = await chooseThemeSavePath(themePackageFileName(pkg.name));
+      if (!path) return;
+      await writeThemeFile(path, serializeThemePackage(pkg));
+      status = `Exported ${path.split(/[\\/]/).at(-1) ?? 'theme.json'}`;
+    } catch (error) {
+      status = readableError(error);
+    }
+  }
+
+  async function htmlForTab(tab: DocumentTab): Promise<string> {
+    const documentPath = tab.path;
+    return buildExportDocument({
+      markdown: tab.content,
+      title: tab.name,
+      profile: exportProfile,
+      mermaid: canRenderMermaid,
+      math: canRenderMath,
+      rewriteImages:
+        documentPath && isDesktop()
+          ? (html) =>
+              rewritePreviewImages(html, async (src) => {
+                try {
+                  const image = await readPreviewImage(documentPath, src);
+                  return `data:${image.mimeType};base64,${image.base64}`;
+                } catch {
+                  return null;
+                }
+              })
+          : undefined,
+    });
+  }
+
+  async function exportActiveDocument() {
+    if (exportBusy) return;
+    const tab = activeTab;
+    if (!tab) return;
+    exportBusy = true;
+    try {
+      await requireCapability('exportProfiles');
+      if (!isDesktop()) {
+        status = 'Native saving is available in the desktop app';
+        return;
+      }
+      rememberExportProfile();
+      const html = await htmlForTab(tab);
+      const path = await chooseExportHtmlPath(htmlExportDefaultPath(tab.name, tab.path));
+      if (!path) return;
+      await exportHtml(path, html);
+      status = `Exported ${path.split(/[\\/]/).at(-1) ?? htmlFileNameForDocument(tab.name)}`;
+    } catch (error) {
+      status = readableError(error);
+    } finally {
+      exportBusy = false;
+    }
+  }
+
+  async function printActiveDocument() {
+    if (exportBusy) return;
+    const tab = activeTab;
+    if (!tab) return;
+    exportBusy = true;
+    try {
+      await requireCapability('exportProfiles');
+      rememberExportProfile();
+      printExportHtml(await htmlForTab(tab));
+      status = `Printing ${tab.name}`;
+    } catch (error) {
+      status = readableError(error);
+    } finally {
+      exportBusy = false;
+    }
   }
 
   function openConflict(tabId: string) {
@@ -466,6 +1015,14 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         run: newDocument,
       },
       {
+        id: 'new-from-recipe',
+        label: 'New from recipe…',
+        description: 'Create a workspace note from a saved recipe',
+        section: 'File',
+        keywords: 'template frontmatter recipe',
+        run: openRecipeDialog,
+      },
+      {
         id: 'open-file',
         label: 'Open file…',
         description: 'Choose a Markdown document from disk',
@@ -499,6 +1056,14 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         keywords: 'write copy rename',
         shortcut: formatShortcut({ mod: true, shift: true, key: 's' }),
         run: () => void saveActive(true),
+      },
+      {
+        id: 'export-html',
+        label: 'Export HTML…',
+        description: 'Save a print-ready HTML copy of the active document',
+        section: 'File',
+        keywords: 'pdf print publish profile',
+        run: openExportDialog,
       },
       {
         id: 'find-document',
@@ -559,6 +1124,22 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         },
       },
       {
+        id: 'focus-timer',
+        label: 'Focus timer',
+        description: 'Start a saved writing timer',
+        section: 'View',
+        keywords: 'pomodoro goal minutes focus',
+        run: openFocusTimer,
+      },
+      {
+        id: 'theme-studio',
+        label: 'Theme Studio',
+        description: 'Edit color tokens and custom CSS',
+        section: 'View',
+        keywords: 'theme color appearance css',
+        run: openThemeStudio,
+      },
+      {
         id: 'open-settings',
         label: 'Open settings',
         description: 'Configure appearance, editor, and file behavior',
@@ -569,7 +1150,7 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     ];
 
     if (canSearchWorkspace) {
-      items.splice(7, 0, {
+      items.splice(9, 0, {
         id: 'search-workspace',
         label: 'Search workspace',
         description: 'Search text across every Markdown document',
@@ -587,10 +1168,18 @@ Try editing this document, or open a Markdown file from the toolbar.`;
 
   function runMenuCommand(id: MenuCommandId | string) {
     // Modals own the interaction; keep Quit available for emergency exit.
-    if ((conflictOpen || namePrompt) && id !== 'quit') return;
+    if (
+      (conflictOpen || namePrompt || exportOpen || themeOpen || recipeOpen || focusTimerOpen) &&
+      id !== 'quit'
+    ) {
+      return;
+    }
     switch (id) {
       case 'new-document':
         newDocument();
+        break;
+      case 'new-from-recipe':
+        openRecipeDialog();
         break;
       case 'open-document':
         void openFile();
@@ -600,6 +1189,9 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         break;
       case 'save-document-as':
         void saveActive(true);
+        break;
+      case 'export-html':
+        openExportDialog();
         break;
       case 'close-tab':
         void closeTab(activeId);
@@ -630,6 +1222,12 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         break;
       case 'preview-view':
         mode = 'preview';
+        break;
+      case 'theme-studio':
+        openThemeStudio();
+        break;
+      case 'focus-timer':
+        openFocusTimer();
         break;
       case 'toggle-focus-mode':
         settings = { ...settings, focusMode: !settings.focusMode };
@@ -695,6 +1293,14 @@ Try editing this document, or open a Markdown file from the toolbar.`;
           paletteOpen = false;
         } else if (namePrompt) {
           resolveNamePrompt(null);
+        } else if (recipeOpen) {
+          closeRecipeDialog();
+        } else if (focusTimerOpen) {
+          closeFocusTimer();
+        } else if (themeOpen) {
+          closeThemeStudio();
+        } else if (exportOpen) {
+          closeExportDialog();
         } else if (settingsOpen) {
           closeSettings();
         } else if (sidebarOpen && drawerOverlay) {
@@ -702,7 +1308,18 @@ Try editing this document, or open a Markdown file from the toolbar.`;
         }
         return;
       }
-      if (paletteOpen || settingsOpen || namePrompt || conflictOpen) return;
+      if (
+        paletteOpen ||
+        settingsOpen ||
+        namePrompt ||
+        conflictOpen ||
+        exportOpen ||
+        themeOpen ||
+        recipeOpen ||
+        focusTimerOpen
+      ) {
+        return;
+      }
       // macOS/Linux native menus own accelerators; handling them here double-fires.
       if (isDesktop() && (appPlatform === 'macos' || appPlatform === 'linux')) return;
       if (!(event.metaKey || event.ctrlKey)) return;
@@ -1153,6 +1770,84 @@ Try editing this document, or open a Markdown file from the toolbar.`;
     void runWorkspaceSearch();
   }
 
+  const PREVIEW_HEADING_SELECTOR = '.markdown-body :is(h1, h2, h3, h4, h5, h6)';
+  const SCROLL_SYNC_HOLD_MS = 120;
+
+  function clearScrollSyncHold() {
+    scrollSyncKey = '';
+    scrollSyncOrigin = null;
+    if (scrollSyncTimer) clearTimeout(scrollSyncTimer);
+    scrollSyncTimer = undefined;
+  }
+
+  function holdScrollSync(origin: 'editor' | 'preview') {
+    scrollSyncOrigin = origin;
+    if (scrollSyncTimer) clearTimeout(scrollSyncTimer);
+    scrollSyncTimer = setTimeout(() => {
+      if (scrollSyncOrigin === origin) scrollSyncOrigin = null;
+    }, SCROLL_SYNC_HOLD_MS);
+  }
+
+  function onEditorViewportLine(line: number) {
+    if (mode === 'preview' || scrollSyncOrigin === 'preview') return;
+    editorViewportLine = line;
+    syncPreviewToEditorLine(line);
+  }
+
+  function syncPreviewToEditorLine(line: number) {
+    if (mode !== 'split' || line < 1 || scrollSyncOrigin === 'preview') return;
+    if (previewDocumentId !== activeId) return;
+    const heading = nearestHeadingAtOrBefore(documentHeadings, line);
+    if (!heading) return;
+    const key = `${activeId}:${heading.line}`;
+    if (scrollSyncKey === key) return;
+    const pane = previewPane;
+    if (!pane) return;
+    const node =
+      pane.querySelectorAll<HTMLElement>(PREVIEW_HEADING_SELECTOR)[
+        documentHeadings.indexOf(heading)
+      ];
+    if (!node) return;
+    const nextTop =
+      pane.scrollTop + node.getBoundingClientRect().top - pane.getBoundingClientRect().top;
+    holdScrollSync('editor');
+    scrollSyncKey = key;
+    if (Math.abs(pane.scrollTop - nextTop) >= 1) pane.scrollTop = nextTop;
+  }
+
+  function previewHeadingIndex(pane: HTMLElement) {
+    const nodes = pane.querySelectorAll<HTMLElement>(PREVIEW_HEADING_SELECTOR);
+    const limit = pane.getBoundingClientRect().top + 1;
+    let index = -1;
+    for (let i = 0; i < nodes.length; i += 1) {
+      const node = nodes[i];
+      if (!node || node.getBoundingClientRect().top > limit) break;
+      index = i;
+    }
+    return index;
+  }
+
+  function handlePreviewScroll(event: Event) {
+    if (mode !== 'split' || scrollSyncOrigin === 'editor') return;
+    const pane = event.currentTarget;
+    if (!(pane instanceof HTMLElement)) return;
+    const index = previewHeadingIndex(pane);
+    if (index < 0) return;
+    const heading = documentHeadings[index];
+    if (!heading) return;
+    const key = `${activeId}:${heading.line}`;
+    if (scrollSyncKey === key) return;
+    holdScrollSync('preview');
+    scrollSyncKey = key;
+    editorViewportLine = heading.line;
+    revealRequest = {
+      line: heading.line,
+      token: (revealRequest?.token ?? 0) + 1,
+      focus: false,
+      align: 'start',
+    };
+  }
+
   function revealOutlineItem(item: { title: string; line: number }) {
     if (mode === 'preview') mode = 'split';
     revealRequest = { line: item.line, token: (revealRequest?.token ?? 0) + 1 };
@@ -1501,6 +2196,35 @@ Try editing this document, or open a Markdown file from the toolbar.`;
       if (loadedSettings?.version === 1) {
         settings = loadedSettings;
         previousUpdateChannel = settings.updateChannel;
+      }
+      try {
+        const loadedProfile = await loadState(EXPORT_PROFILE_KEY, normalizeExportProfile);
+        if (loadedProfile && !exportOpen) exportProfile = loadedProfile;
+      } catch {
+        // A bad export profile must not block session restore.
+      }
+      try {
+        const loadedRecipes = await loadState(DOCUMENT_RECIPES_KEY, normalizeDocumentRecipes);
+        if (loadedRecipes && !recipeOpen) documentRecipes = loadedRecipes;
+      } catch {
+        // A bad recipe list must not block session restore.
+      }
+      try {
+        const loadedPresets = await loadState(FOCUS_PRESETS_KEY, normalizeFocusPresets);
+        if (loadedPresets && !focusTimerOpen) focusPresets = loadedPresets;
+      } catch {
+        // A bad focus preset list must not block session restore.
+      }
+      if (hasCapability('themeStudio')) {
+        try {
+          const loadedTheme = await loadState(THEME_PACKAGE_KEY, normalizeThemePackage);
+          if (loadedTheme && !themeOpen) {
+            applyThemePackage(loadedTheme);
+            themePackage = loadedTheme;
+          }
+        } catch {
+          // A bad theme package must not block session restore.
+        }
       }
       const session = await loadState('session', normalizeSessionState);
       if (session && settings.restoreSession) {
@@ -1897,18 +2621,38 @@ Try editing this document, or open a Markdown file from the toolbar.`;
             retainedDocumentIds={tabs.map((tab) => tab.id)}
             {findRequest}
             {revealRequest}
+            splitActive={mode === 'split'}
             onchange={updateContent}
             onselectionchange={updateSelection}
+            onviewportline={onEditorViewportLine}
           />
         </div>
         {#if mode !== 'source'}
-          <div class="preview-pane" role="presentation" onclick={handlePreviewClick}>
+          <div
+            class="preview-pane"
+            role="presentation"
+            bind:this={previewPane}
+            onscroll={handlePreviewScroll}
+            onclick={handlePreviewClick}
+          >
             <!-- Preview HTML is produced by rehype-sanitize in src/lib/preview.ts. -->
             <!-- eslint-disable-next-line svelte/no-at-html-tags -->
             <div class="markdown-body preview-{settings.previewFont}">{@html preview}</div>
           </div>
         {/if}
       </section>
+
+      <FocusTimer
+        open={focusTimerOpen}
+        presets={focusPresets}
+        session={focusSessionView}
+        onclose={closeFocusTimer}
+        onsave={rememberFocusPresets}
+        onbegin={beginFocusPreset}
+        onresume={resumeOrRestartFocus}
+        onpause={pauseFocusTimer}
+        onstop={stopFocusTimer}
+      />
 
       <StatusBar
         {status}
@@ -1930,6 +2674,34 @@ Try editing this document, or open a Markdown file from the toolbar.`;
   oncheckupdates={() => void checkUpdates()}
   onclose={closeSettings}
   onopenexternalurl={openExternalUrl}
+/>
+
+<ExportDialog
+  open={exportOpen}
+  profile={exportProfile}
+  busy={exportBusy}
+  onprofile={setExportProfile}
+  onclose={closeExportDialog}
+  onexport={() => void exportActiveDocument()}
+  onprint={() => void printActiveDocument()}
+/>
+
+<ThemeStudio
+  open={themeOpen}
+  initial={themePackage}
+  onsave={saveThemePackage}
+  onreset={resetThemePackage}
+  onimport={importThemePackage}
+  onexport={exportThemePackage}
+  onclose={closeThemeStudio}
+/>
+
+<RecipeDialog
+  open={recipeOpen}
+  recipes={documentRecipes}
+  onclose={closeRecipeDialog}
+  onsave={rememberDocumentRecipes}
+  oncreate={createRecipeDocument}
 />
 
 <NamePromptDialog

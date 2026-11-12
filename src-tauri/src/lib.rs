@@ -4,13 +4,15 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 use tauri::{AppHandle, Emitter, Manager, Url};
 use thiserror::Error;
 use walkdir::{DirEntry, WalkDir};
 
 const MAX_DOCUMENT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_EXPORT_HTML_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_THEME_FILE_BYTES: u64 = 256 * 1024;
 /// Session/draft JSON can hold multiple tabs; keep a hard ceiling above one document.
 const MAX_APP_STATE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_WORKSPACE_FILES: usize = 20_000;
@@ -26,6 +28,10 @@ struct PendingOpenPaths(Mutex<Vec<String>>);
 enum AppError {
     #[error("The selected file is larger than 16 MB")]
     FileTooLarge,
+    #[error("Export HTML is empty")]
+    EmptyExport,
+    #[error("Export HTML is larger than 32 MB")]
+    ExportTooLarge,
     #[error("Saved application state exceeds the 64 MB limit")]
     AppStateTooLarge,
     #[error("The selected path is not a regular file")]
@@ -44,8 +50,20 @@ enum AppError {
     WorkspaceNotAdopted,
     #[error("That document path is not available")]
     PathNotConsented,
+    #[error("The image is outside the allowed folder")]
+    ImageNotAllowed,
+    #[error("The image is larger than 2 MB")]
+    ImageTooLarge,
+    #[error("Only PNG, JPEG, GIF, and WebP images can be previewed")]
+    ImageTypeRejected,
     #[error("Only Markdown documents can be created, renamed, or deleted here")]
     NotMarkdown,
+    #[error("Choose a file name that ends in .html or .htm")]
+    NotHtml,
+    #[error("Choose a file name that ends in .json")]
+    NotJson,
+    #[error("Theme files must be 256 KiB or smaller")]
+    ThemeFileTooLarge,
     #[error("A file with that name already exists")]
     AlreadyExists,
     #[error("That name is not a valid file name")]
@@ -62,6 +80,37 @@ enum AppError {
 
 struct AdoptedWorkspace(Mutex<Option<PathBuf>>);
 struct ConsentedPaths(Mutex<HashSet<PathBuf>>);
+/// In-memory search corpus for the adopted workspace. Not written to disk.
+struct SearchIndexState(Mutex<Option<PreparedSearchIndex>>);
+
+enum PreparedSearchIndex {
+    Ready(Arc<WorkspaceSearchIndex>),
+    TooLarge(PathBuf),
+}
+
+struct WorkspaceSearchIndex {
+    root: PathBuf,
+    documents: Vec<Arc<IndexedDocument>>,
+}
+
+struct IndexedDocument {
+    path: PathBuf,
+    relative_path: String,
+    name: String,
+    /// Absent when the file is over the scan cap or not valid UTF-8.
+    content: Option<String>,
+}
+
+enum SearchIndexLookup {
+    Missing,
+    TooLarge,
+    Ready(Arc<WorkspaceSearchIndex>),
+}
+
+enum IndexEdit {
+    Updated,
+    TooLarge,
+}
 
 impl Serialize for AppError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -116,6 +165,13 @@ struct SearchOutcome {
     scanned_files: usize,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreviewImage {
+    mime_type: String,
+    base64: String,
+}
+
 /// Raw link and tag references extracted from one document. Resolving these into a
 /// graph happens in the frontend, where the path rules are unit tested.
 #[derive(Serialize)]
@@ -126,6 +182,8 @@ struct DocumentReferences {
     name: String,
     links: Vec<String>,
     tags: Vec<String>,
+    /// True when the note has an ATX heading or a non-empty frontmatter title.
+    has_title: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -178,12 +236,18 @@ impl EditionCapability {
     ];
 
     /// Capabilities that are implemented and enforced today (not Phase 3 placeholders).
-    const SHIPPED: [Self; 5] = [
+    const SHIPPED: [Self; 11] = [
         Self::WorkspaceSearch,
         Self::Backlinks,
         Self::WikiLinks,
         Self::Tags,
         Self::WorkspaceIntelligence,
+        Self::Mermaid,
+        Self::Math,
+        Self::ExportProfiles,
+        Self::ThemeStudio,
+        Self::DocumentRecipes,
+        Self::FocusSessionPresets,
     ];
 
     fn label(self) -> &'static str {
@@ -402,12 +466,6 @@ fn save_document(
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
 
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("document.md");
-    let temporary = parent.join(format!(".{file_name}.tuxedo-tmp"));
-
     if !force {
         if let (Some(expected), Ok(metadata)) = (&expected_fingerprint, fs::metadata(&path)) {
             let actual = fingerprint(&path, &metadata)?;
@@ -417,21 +475,12 @@ fn save_document(
         }
     }
 
-    let result = (|| -> Result<(), std::io::Error> {
-        let mut file = fs::File::create(&temporary)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        replace_file(&temporary, &path)?;
-        Ok(())
-    })();
-
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result.map_err(AppError::from)?;
+    write_document_bytes(&path, content.as_bytes())?;
     consent_path(&app, &path)?;
     let metadata = fs::metadata(&path)?;
-    fingerprint_from_bytes(&metadata, content.as_bytes())
+    let fingerprint = fingerprint_from_bytes(&metadata, content.as_bytes())?;
+    refresh_search_index_after_save(&app, &path, &content);
+    Ok(fingerprint)
 }
 
 #[tauri::command]
@@ -593,8 +642,107 @@ fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Same-directory temp replace used by document saves. Bytes are written unchanged.
+fn write_document_bytes(path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("document.md");
+    let temporary = parent.join(format!(".{file_name}.tuxedo-tmp"));
+    let result = (|| -> Result<(), std::io::Error> {
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        replace_file(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result.map_err(AppError::from)
+}
+
+fn is_html_export_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            let lower = name.to_ascii_lowercase();
+            lower.ends_with(".html") || lower.ends_with(".htm")
+        })
+}
+
+/// Save-as HTML export. Any user path is allowed; bytes are written unchanged.
+#[tauri::command]
+fn export_html(path: PathBuf, html: String) -> Result<(), AppError> {
+    require_capability(EditionCapability::ExportProfiles)?;
+    if html.is_empty() {
+        return Err(AppError::EmptyExport);
+    }
+    if u64::try_from(html.len()).unwrap_or(u64::MAX) > MAX_EXPORT_HTML_BYTES {
+        return Err(AppError::ExportTooLarge);
+    }
+    if path.is_dir() {
+        return Err(AppError::NotAFile);
+    }
+    if !is_html_export_path(&path) {
+        return Err(AppError::NotHtml);
+    }
+    write_document_bytes(&path, html.as_bytes())
+}
+
+fn is_json_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".json"))
+}
+
+fn theme_bytes_too_large(len: u64) -> bool {
+    len > MAX_THEME_FILE_BYTES
+}
+
+/// Reads one Theme Studio package. Theme Studio only, .json, regular file, 256 KiB.
+#[tauri::command]
+fn read_theme_file(path: PathBuf) -> Result<String, AppError> {
+    require_capability(EditionCapability::ThemeStudio)?;
+    if !is_json_path(&path) {
+        return Err(AppError::NotJson);
+    }
+    let metadata = fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_file() {
+        return Err(AppError::NotAFile);
+    }
+    if theme_bytes_too_large(metadata.len()) {
+        return Err(AppError::ThemeFileTooLarge);
+    }
+    let content = fs::read_to_string(&path)?;
+    if theme_bytes_too_large(u64::try_from(content.len()).unwrap_or(u64::MAX)) {
+        return Err(AppError::ThemeFileTooLarge);
+    }
+    Ok(content)
+}
+
+/// Writes one Theme Studio package with the same-directory replace used by saves.
+#[tauri::command]
+fn write_theme_file(path: PathBuf, content: String) -> Result<(), AppError> {
+    require_capability(EditionCapability::ThemeStudio)?;
+    if theme_bytes_too_large(u64::try_from(content.len()).unwrap_or(u64::MAX)) {
+        return Err(AppError::ThemeFileTooLarge);
+    }
+    if !is_json_path(&path) {
+        return Err(AppError::NotJson);
+    }
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Err(AppError::NotAFile),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    write_document_bytes(&path, content.as_bytes())
+}
+
 /// `root` must already be canonical. Returns true when `path` canonicalizes under it.
-#[cfg(test)]
 fn path_confined_to_root(root: &Path, path: &Path) -> bool {
     match fs::canonicalize(path) {
         Ok(canonical) => canonical.starts_with(root),
@@ -677,6 +825,7 @@ fn require_adopted_workspace(app: &AppHandle, root: &Path) -> Result<PathBuf, Ap
 #[tauri::command]
 fn adopt_workspace_folder(app: AppHandle, root: PathBuf) -> Result<String, AppError> {
     let canonical = adopt_workspace(&app, &root)?;
+    rebuild_search_index(&app, &canonical);
     Ok(canonical.to_string_lossy().into_owned())
 }
 
@@ -728,6 +877,257 @@ fn line_contains_query(line: &str, needle: &str, case_sensitive: bool) -> bool {
     }
 }
 
+fn readable_search_content(path: &Path) -> Option<String> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_SCAN_FILE_BYTES {
+        return None;
+    }
+    // Unreadable or non-UTF-8 files stay in the corpus but are not scanned.
+    fs::read_to_string(path).ok()
+}
+
+fn read_indexed_document(root: &Path, path: &Path) -> IndexedDocument {
+    let entry = workspace_entry(root, path);
+    IndexedDocument {
+        path: path.to_path_buf(),
+        relative_path: entry.relative_path,
+        name: entry.name,
+        content: readable_search_content(path),
+    }
+}
+
+fn indexed_document_with_content(root: &Path, path: &Path, content: &str) -> IndexedDocument {
+    let entry = workspace_entry(root, path);
+    let stored = if u64::try_from(content.len()).unwrap_or(u64::MAX) > MAX_SCAN_FILE_BYTES {
+        None
+    } else {
+        Some(content.to_owned())
+    };
+    IndexedDocument {
+        path: path.to_path_buf(),
+        relative_path: entry.relative_path,
+        name: entry.name,
+        content: stored,
+    }
+}
+
+fn build_workspace_search_index(root: &Path) -> Result<WorkspaceSearchIndex, AppError> {
+    let paths = walk_markdown_files(root)?;
+    let mut documents = Vec::with_capacity(paths.len());
+    for path in &paths {
+        documents.push(Arc::new(read_indexed_document(root, path)));
+    }
+    Ok(WorkspaceSearchIndex {
+        root: root.to_path_buf(),
+        documents,
+    })
+}
+
+fn query_search_index(
+    index: &WorkspaceSearchIndex,
+    query: &str,
+    case_sensitive: bool,
+) -> SearchOutcome {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return SearchOutcome {
+            matches: Vec::new(),
+            truncated: false,
+            scanned_files: 0,
+        };
+    }
+    let needle = if case_sensitive {
+        trimmed.to_owned()
+    } else {
+        trimmed.to_lowercase()
+    };
+
+    let mut matches = Vec::new();
+    let mut truncated = false;
+    let mut scanned_files = 0usize;
+    for document in &index.documents {
+        let Some(content) = document.content.as_deref() else {
+            continue;
+        };
+        scanned_files += 1;
+        for (line_number, line) in content.lines().enumerate() {
+            if !line_contains_query(line, &needle, case_sensitive) {
+                continue;
+            }
+            if matches.len() >= MAX_SEARCH_RESULTS {
+                truncated = true;
+                break;
+            }
+            matches.push(SearchMatch {
+                path: document.path.to_string_lossy().into_owned(),
+                relative_path: document.relative_path.clone(),
+                name: document.name.clone(),
+                line: line_number + 1,
+                preview: preview_line(line),
+            });
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    SearchOutcome {
+        matches,
+        truncated,
+        scanned_files,
+    }
+}
+
+fn adopted_search_root(app: &AppHandle, path: &Path) -> Option<PathBuf> {
+    if !workspace_search_enabled() {
+        return None;
+    }
+    let state = app.state::<AdoptedWorkspace>();
+    let guard = state
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let root = guard.as_ref()?;
+    path.starts_with(root).then(|| root.clone())
+}
+
+fn replace_search_index(app: &AppHandle, next: Option<PreparedSearchIndex>) {
+    let state = app.state::<SearchIndexState>();
+    let mut guard = state
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = next;
+}
+
+fn load_search_index(app: &AppHandle, root: &Path) -> SearchIndexLookup {
+    let state = app.state::<SearchIndexState>();
+    let guard = state
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match guard.as_ref() {
+        Some(PreparedSearchIndex::TooLarge(indexed)) if indexed == root => {
+            SearchIndexLookup::TooLarge
+        }
+        Some(PreparedSearchIndex::Ready(index)) if index.root == root => {
+            SearchIndexLookup::Ready(Arc::clone(index))
+        }
+        _ => SearchIndexLookup::Missing,
+    }
+}
+
+fn edit_search_index(
+    app: &AppHandle,
+    root: &Path,
+    edit: impl FnOnce(&mut Vec<Arc<IndexedDocument>>) -> IndexEdit,
+) {
+    if !workspace_search_enabled() {
+        return;
+    }
+    let state = app.state::<SearchIndexState>();
+    let mut guard = state
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let next = {
+        let Some(PreparedSearchIndex::Ready(current)) = guard.as_ref() else {
+            return;
+        };
+        if current.root != root {
+            return;
+        }
+        let mut documents = current.documents.clone();
+        let indexed_root = current.root.clone();
+        match edit(&mut documents) {
+            IndexEdit::TooLarge => PreparedSearchIndex::TooLarge(indexed_root),
+            IndexEdit::Updated => PreparedSearchIndex::Ready(Arc::new(WorkspaceSearchIndex {
+                root: indexed_root,
+                documents,
+            })),
+        }
+    };
+    *guard = Some(next);
+}
+
+fn rebuild_search_index(app: &AppHandle, root: &Path) {
+    if !workspace_search_enabled() {
+        return;
+    }
+    let next = match build_workspace_search_index(root) {
+        Ok(index) => Some(PreparedSearchIndex::Ready(Arc::new(index))),
+        Err(AppError::WorkspaceTooLarge) => Some(PreparedSearchIndex::TooLarge(root.to_path_buf())),
+        Err(_) => None,
+    };
+    replace_search_index(app, next);
+}
+
+fn refresh_search_index_after_save(app: &AppHandle, path: &Path, content: &str) {
+    let Some(root) = adopted_search_root(app, path) else {
+        return;
+    };
+    if !is_markdown(path) {
+        return;
+    }
+    edit_search_index(app, &root, |documents| {
+        let replacement = Arc::new(indexed_document_with_content(&root, path, content));
+        if let Some(position) = documents.iter().position(|document| document.path == path) {
+            documents[position] = replacement;
+            return IndexEdit::Updated;
+        }
+        if documents.len() >= MAX_WORKSPACE_FILES {
+            return IndexEdit::TooLarge;
+        }
+        documents.push(replacement);
+        IndexEdit::Updated
+    });
+}
+
+fn refresh_search_index_after_rename(app: &AppHandle, root: &Path, from: &Path, to: &Path) {
+    if from == to {
+        return;
+    }
+    edit_search_index(app, root, |documents| {
+        let Some(position) = documents.iter().position(|document| document.path == from) else {
+            return IndexEdit::Updated;
+        };
+        let entry = workspace_entry(root, to);
+        let content = documents[position].content.clone();
+        documents[position] = Arc::new(IndexedDocument {
+            path: to.to_path_buf(),
+            relative_path: entry.relative_path,
+            name: entry.name,
+            content,
+        });
+        IndexEdit::Updated
+    });
+}
+
+fn refresh_search_index_after_delete(app: &AppHandle, root: &Path, path: &Path) {
+    if !workspace_search_enabled() {
+        return;
+    }
+    let too_large = {
+        let state = app.state::<SearchIndexState>();
+        let guard = state
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        matches!(
+            guard.as_ref(),
+            Some(PreparedSearchIndex::TooLarge(indexed)) if indexed == root
+        )
+    };
+    if too_large {
+        rebuild_search_index(app, root);
+        return;
+    }
+    edit_search_index(app, root, |documents| {
+        documents.retain(|document| document.path != path);
+        IndexEdit::Updated
+    });
+}
+
 #[tauri::command]
 async fn search_workspace(
     app: AppHandle,
@@ -747,60 +1147,153 @@ async fn search_workspace(
         });
     }
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let needle = if case_sensitive {
-            trimmed
-        } else {
-            trimmed.to_lowercase()
-        };
-
-        let mut matches = Vec::new();
-        let mut truncated = false;
-        let mut scanned_files = 0usize;
-
-        for path in walk_markdown_files(&canonical_root)? {
-            let Ok(metadata) = fs::metadata(&path) else {
-                continue;
-            };
-            if metadata.len() > MAX_SCAN_FILE_BYTES {
-                continue;
-            }
-            // Unreadable or non-UTF-8 files are skipped rather than failing the whole search.
-            let Ok(content) = fs::read_to_string(&path) else {
-                continue;
-            };
-            scanned_files += 1;
-            let entry = workspace_entry(&canonical_root, &path);
-
-            for (index, line) in content.lines().enumerate() {
-                if !line_contains_query(line, &needle, case_sensitive) {
-                    continue;
+    let index = match load_search_index(&app, &canonical_root) {
+        SearchIndexLookup::TooLarge => return Err(AppError::WorkspaceTooLarge),
+        SearchIndexLookup::Ready(index) => index,
+        SearchIndexLookup::Missing => {
+            let root_for_build = canonical_root.clone();
+            let built = tauri::async_runtime::spawn_blocking(move || {
+                build_workspace_search_index(&root_for_build)
+            })
+            .await
+            .map_err(|error| AppError::Io(std::io::Error::other(error.to_string())))?;
+            match built {
+                Ok(built_index) => {
+                    let index = Arc::new(built_index);
+                    replace_search_index(
+                        &app,
+                        Some(PreparedSearchIndex::Ready(Arc::clone(&index))),
+                    );
+                    index
                 }
-                if matches.len() >= MAX_SEARCH_RESULTS {
-                    truncated = true;
-                    break;
+                Err(AppError::WorkspaceTooLarge) => {
+                    replace_search_index(&app, Some(PreparedSearchIndex::TooLarge(canonical_root)));
+                    return Err(AppError::WorkspaceTooLarge);
                 }
-                matches.push(SearchMatch {
-                    path: entry.path.clone(),
-                    relative_path: entry.relative_path.clone(),
-                    name: entry.name.clone(),
-                    line: index + 1,
-                    preview: preview_line(line),
-                });
-            }
-            if truncated {
-                break;
+                Err(error) => return Err(error),
             }
         }
+    };
 
-        Ok(SearchOutcome {
-            matches,
-            truncated,
-            scanned_files,
-        })
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(query_search_index(&index, &trimmed, case_sensitive))
     })
     .await
-    .map_err(|e| AppError::Io(std::io::Error::other(e.to_string())))?
+    .map_err(|error| AppError::Io(std::io::Error::other(error.to_string())))?
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = u32::from(chunk[0]);
+        let second = chunk.get(1).copied().map(u32::from).unwrap_or(0);
+        let third = chunk.get(2).copied().map(u32::from).unwrap_or(0);
+        let combined = (first << 16) | (second << 8) | third;
+        let indexes = [
+            (combined >> 18) & 0x3f,
+            (combined >> 12) & 0x3f,
+            (combined >> 6) & 0x3f,
+            combined & 0x3f,
+        ];
+        output.push(TABLE[indexes[0] as usize] as char);
+        output.push(TABLE[indexes[1] as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[indexes[2] as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[indexes[3] as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
+}
+
+fn raster_mime_type(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png") => Some("image/png"),
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("gif") => Some("image/gif"),
+        Some("webp") => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn allowed_image_root(adopted_root: Option<&Path>, document: &Path) -> Result<PathBuf, AppError> {
+    let document_dir = document.parent().ok_or(AppError::ImageNotAllowed)?;
+    if let Some(root) = adopted_root.filter(|root| document.starts_with(root)) {
+        return Ok(root.to_path_buf());
+    }
+    Ok(document_dir.to_path_buf())
+}
+
+fn resolve_image_candidate(document_dir: &Path, source: &str) -> Result<PathBuf, AppError> {
+    let source = source.trim();
+    if source.is_empty() || source.contains('\0') || source.contains('\n') || source.contains('\r')
+    {
+        return Err(AppError::ImageNotAllowed);
+    }
+    Ok(document_dir.join(source))
+}
+
+fn read_confined_raster_image(
+    allowed_root: &Path,
+    candidate: &Path,
+) -> Result<PreviewImage, AppError> {
+    let requested_mime = raster_mime_type(candidate).ok_or(AppError::ImageTypeRejected)?;
+    if !path_confined_to_root(allowed_root, candidate) {
+        return Err(AppError::ImageNotAllowed);
+    }
+    let canonical = fs::canonicalize(candidate)?;
+    if raster_mime_type(&canonical) != Some(requested_mime) {
+        return Err(AppError::ImageTypeRejected);
+    }
+    let metadata = fs::metadata(&canonical)?;
+    if !metadata.is_file() {
+        return Err(AppError::NotAFile);
+    }
+    if metadata.len() > MAX_SCAN_FILE_BYTES {
+        return Err(AppError::ImageTooLarge);
+    }
+    let bytes = fs::read(&canonical)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_SCAN_FILE_BYTES {
+        return Err(AppError::ImageTooLarge);
+    }
+    Ok(PreviewImage {
+        mime_type: requested_mime.to_owned(),
+        base64: encode_base64(&bytes),
+    })
+}
+
+/// Loads one local raster image for preview. Workspace documents may use sibling
+/// folders; other open documents stay inside their own directory.
+#[tauri::command]
+fn read_preview_image(
+    app: AppHandle,
+    document_path: PathBuf,
+    source: String,
+) -> Result<PreviewImage, AppError> {
+    let document = allow_document_access(&app, &document_path)?;
+    let adopted = {
+        let state = app.state::<AdoptedWorkspace>();
+        let guard = state
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.clone()
+    };
+    let allowed_root = allowed_image_root(adopted.as_deref(), &document)?;
+    let document_dir = document.parent().ok_or(AppError::ImageNotAllowed)?;
+    let candidate = resolve_image_candidate(document_dir, &source)?;
+    read_confined_raster_image(&allowed_root, &candidate)
 }
 
 fn find_char(chars: &[char], start: usize, needle: char) -> Option<usize> {
@@ -972,6 +1465,138 @@ fn extract_references(content: &str) -> (Vec<String>, Vec<String>) {
     )
 }
 
+fn is_atx_heading(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut hashes = 0;
+    while hashes < bytes.len() && bytes[hashes] == b'#' {
+        hashes += 1;
+        if hashes > 6 {
+            return false;
+        }
+    }
+    if hashes == 0 || hashes == bytes.len() {
+        return false;
+    }
+    let rest = &line[hashes..];
+    let mut chars = rest.chars();
+    match chars.next() {
+        Some(ch) if ch.is_whitespace() => chars.any(|next| !next.is_whitespace()),
+        _ => false,
+    }
+}
+
+fn title_scalar(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("title")?;
+    rest.trim_start().strip_prefix(':').map(str::trim)
+}
+
+fn is_block_scalar(value: &str) -> bool {
+    let token = value.split_whitespace().next().unwrap_or("");
+    matches!(token, "|" | ">" | "|-" | "|+" | ">-" | ">+")
+}
+
+fn yaml_scalar_is_empty(raw: &str) -> bool {
+    let value = raw.trim();
+    if value.is_empty() || matches!(value, "~" | "null" | "Null" | "NULL") {
+        return true;
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 {
+        let quote = bytes[0];
+        if (quote == b'"' || quote == b'\'') && bytes[bytes.len() - 1] == quote {
+            return value[1..value.len() - 1].trim().is_empty();
+        }
+    }
+    false
+}
+
+fn frontmatter_has_title(frontmatter: &str) -> bool {
+    if frontmatter.is_empty() {
+        return false;
+    }
+    let lines: Vec<&str> = frontmatter.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        index += 1;
+        if line.starts_with(' ') || line.starts_with('\t') {
+            continue;
+        }
+        let Some(raw) = title_scalar(line) else {
+            continue;
+        };
+        if is_block_scalar(raw) {
+            let mut text = String::new();
+            while index < lines.len() {
+                let next = lines[index];
+                if next.is_empty() {
+                    text.push('\n');
+                    index += 1;
+                    continue;
+                }
+                if next.starts_with(' ') || next.starts_with('\t') {
+                    text.push_str(next.trim());
+                    text.push('\n');
+                    index += 1;
+                    continue;
+                }
+                break;
+            }
+            if !text.trim().is_empty() {
+                return true;
+            }
+            continue;
+        }
+        if !yaml_scalar_is_empty(raw) {
+            return true;
+        }
+    }
+    false
+}
+
+fn split_frontmatter(content: &str) -> (&str, &str) {
+    let Some(rest) = content.strip_prefix("---") else {
+        return ("", content);
+    };
+    let rest = rest.strip_prefix('\r').unwrap_or(rest);
+    let Some(rest) = rest.strip_prefix('\n') else {
+        return ("", content);
+    };
+    let mut offset = 0;
+    for line in rest.split_inclusive('\n') {
+        if line.trim_end_matches(['\r', '\n']).trim() == "---" {
+            return (&rest[..offset], &rest[offset + line.len()..]);
+        }
+        offset += line.len();
+    }
+    ("", content)
+}
+
+/// A title is an ATX heading or a non-empty `title` in a leading `---` block.
+/// Fenced code is not a heading, matching the link scan.
+fn document_has_title(content: &str) -> bool {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let (frontmatter, body) = split_frontmatter(content);
+    if frontmatter_has_title(frontmatter) {
+        return true;
+    }
+    let mut in_fence = false;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if is_atx_heading(line) {
+            return true;
+        }
+    }
+    false
+}
+
 #[tauri::command]
 async fn collect_workspace_references(
     app: AppHandle,
@@ -1001,6 +1626,7 @@ async fn collect_workspace_references(
                 continue;
             };
             let (links, tags) = extract_references(&content);
+            let has_title = document_has_title(&content);
             let entry = workspace_entry(&canonical_root, &path);
             documents.push(DocumentReferences {
                 path: entry.path,
@@ -1008,6 +1634,7 @@ async fn collect_workspace_references(
                 name: entry.name,
                 links,
                 tags,
+                has_title,
             });
         }
 
@@ -1178,6 +1805,7 @@ fn create_workspace_document(
     }
     write_replacement(&target, content.as_bytes())?;
     let canonical_target = fs::canonicalize(&target)?;
+    refresh_search_index_after_save(&app, &canonical_target, &content);
     Ok(workspace_entry(&canonical_root, &canonical_target))
 }
 
@@ -1237,7 +1865,13 @@ fn rename_workspace_document(
     new_name: String,
 ) -> Result<WorkspaceEntry, AppError> {
     let canonical_root = require_adopted_workspace(&app, &root)?;
-    rename_workspace_document_inner(&canonical_root, path, new_name)
+    let source = resolve_inside_workspace(&canonical_root, &path)?;
+    let source_key = fs::canonicalize(&source).unwrap_or(source);
+    let entry = rename_workspace_document_inner(&canonical_root, path, new_name)?;
+    if let Ok(destination) = fs::canonicalize(Path::new(&entry.path)) {
+        refresh_search_index_after_rename(&app, &canonical_root, &source_key, &destination);
+    }
+    Ok(entry)
 }
 
 fn delete_workspace_document_inner(adopted_root: &Path, path: PathBuf) -> Result<(), AppError> {
@@ -1258,6 +1892,7 @@ fn delete_workspace_document(app: AppHandle, root: PathBuf, path: PathBuf) -> Re
     if let Ok(mut guard) = app.state::<ConsentedPaths>().0.lock() {
         guard.remove(&canonical);
     }
+    refresh_search_index_after_delete(&app, &canonical_root, &canonical);
     Ok(())
 }
 
@@ -1271,6 +1906,10 @@ fn capabilities_for_edition(edition: Edition) -> Vec<EditionCapability> {
 /// Native commands that implement edition-gated behavior must call this helper themselves.
 /// The public authorization command exists for early UI feedback, not as a substitute for
 /// enforcement inside the operation that accesses the gated capability.
+fn workspace_search_enabled() -> bool {
+    capabilities_for_edition(Edition::current()).contains(&EditionCapability::WorkspaceSearch)
+}
+
 fn require_capability(capability: EditionCapability) -> Result<(), AppError> {
     if capabilities_for_edition(Edition::current()).contains(&capability) {
         Ok(())
@@ -1403,6 +2042,13 @@ fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
                     true,
                     Some("CmdOrCtrl+N"),
                 )?,
+                &MenuItem::with_id(
+                    handle,
+                    "new-from-recipe",
+                    "New from Recipe…",
+                    true,
+                    None::<&str>,
+                )?,
                 &MenuItem::with_id(handle, "open-document", "Open…", true, Some("CmdOrCtrl+O"))?,
                 &MenuItem::with_id(handle, "save-document", "Save", true, Some("CmdOrCtrl+S"))?,
                 &MenuItem::with_id(
@@ -1412,6 +2058,7 @@ fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
                     true,
                     Some("CmdOrCtrl+Shift+S"),
                 )?,
+                &MenuItem::with_id(handle, "export-html", "Export HTML…", true, None::<&str>)?,
                 &MenuItem::with_id(handle, "close-tab", "Close Tab", true, Some("CmdOrCtrl+W"))?,
                 &PredefinedMenuItem::separator(handle)?,
                 // Custom quit so the frontend can confirm unsaved changes first.
@@ -1482,6 +2129,8 @@ fn setup_native_menu(app: &tauri::App) -> tauri::Result<()> {
                     true,
                     None::<&str>,
                 )?,
+                &MenuItem::with_id(handle, "focus-timer", "Focus Timer", true, None::<&str>)?,
+                &MenuItem::with_id(handle, "theme-studio", "Theme Studio", true, None::<&str>)?,
                 &MenuItem::with_id(handle, "settings", "Settings", true, Some("CmdOrCtrl+,"))?,
             ],
         )?;
@@ -1657,7 +2306,8 @@ pub fn run() {
     let mut builder = tauri::Builder::default()
         .manage(PendingOpenPaths(Mutex::new(pending_paths)))
         .manage(AdoptedWorkspace(Mutex::new(None)))
-        .manage(ConsentedPaths(Mutex::new(HashSet::new())));
+        .manage(ConsentedPaths(Mutex::new(HashSet::new())))
+        .manage(SearchIndexState(Mutex::new(None)));
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, arguments, _| {
@@ -1703,9 +2353,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             open_document,
             save_document,
+            export_html,
+            read_theme_file,
+            write_theme_file,
             scan_workspace,
             adopt_workspace_folder,
             search_workspace,
+            read_preview_image,
             collect_workspace_references,
             create_workspace_document,
             rename_workspace_document,
@@ -1764,6 +2418,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TempCleanup(PathBuf);
+
+    impl TempCleanup {
+        fn prepare(path: PathBuf) -> Self {
+            let _ = fs::remove_dir_all(&path);
+            let cleanup = Self(path);
+            fs::create_dir_all(&cleanup.0).expect("temp fixture");
+            cleanup
+        }
+    }
+
+    impl Drop for TempCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn recognizes_markdown_extensions_case_insensitively() {
@@ -1838,6 +2509,24 @@ mod tests {
     }
 
     #[test]
+    fn document_title_uses_atx_headings_or_frontmatter() {
+        assert!(!document_has_title("No heading here.\n"));
+        assert!(document_has_title("# Title\n"));
+        assert!(document_has_title("## Spaced\n"));
+        assert!(!document_has_title("# \n"));
+        assert!(!document_has_title("#NoSpace\n"));
+        assert!(!document_has_title("Title\n=====\n"));
+        assert!(document_has_title("---\ntitle: Note\n---\nbody\n"));
+        assert!(document_has_title("---\ntitle: \"Note\"\n---\n"));
+        assert!(!document_has_title("---\ntitle:\n---\nbody\n"));
+        assert!(!document_has_title("---\ntitle: \"\"\n---\n"));
+        assert!(!document_has_title("---\n# comment\n---\nbody\n"));
+        assert!(document_has_title("---\nauthor: a\n---\n# Later\n"));
+        assert!(document_has_title("---\ntitle: |\n  Nested\n---\n"));
+        assert!(!document_has_title("```\n# Hidden\n```\nJust text\n"));
+    }
+
+    #[test]
     fn truncates_long_search_previews_on_character_boundaries() {
         let short = preview_line("   hello world   ");
         assert_eq!(short, "hello world");
@@ -1870,7 +2559,7 @@ mod tests {
             capabilities_for_edition(Edition::Full).len(),
             EditionCapability::SHIPPED.len()
         );
-        assert!(EditionCapability::SHIPPED.len() < EditionCapability::ALL.len());
+        assert!(EditionCapability::SHIPPED.len() <= EditionCapability::ALL.len());
     }
 
     #[test]
@@ -1905,7 +2594,154 @@ mod tests {
             );
         }
         assert!(authorize_capability(EditionCapability::WorkspaceSearch).is_ok());
-        assert!(require_capability(EditionCapability::Mermaid).is_err());
+        assert!(require_capability(EditionCapability::Mermaid).is_ok());
+        assert!(require_capability(EditionCapability::Math).is_ok());
+        assert!(require_capability(EditionCapability::ExportProfiles).is_ok());
+        assert!(require_capability(EditionCapability::ThemeStudio).is_ok());
+        assert!(require_capability(EditionCapability::DocumentRecipes).is_ok());
+        assert!(require_capability(EditionCapability::FocusSessionPresets).is_ok());
+    }
+
+    #[test]
+    fn html_export_paths_accept_html_and_htm_names() {
+        assert!(is_html_export_path(Path::new("Note.HTML")));
+        assert!(is_html_export_path(Path::new("dir/page.HtM")));
+        assert!(is_html_export_path(Path::new(".html")));
+        assert!(!is_html_export_path(Path::new("note.md")));
+        assert!(!is_html_export_path(Path::new("note.html.txt")));
+        assert!(!is_html_export_path(Path::new("note.xhtml")));
+        assert!(!is_html_export_path(Path::new("note")));
+    }
+
+    #[test]
+    fn export_html_writes_bytes_only_for_full_builds() {
+        let root = std::env::temp_dir().join(format!("tuxedo-export-html-{}", std::process::id()));
+        let _cleanup = TempCleanup::prepare(root.clone());
+        let destination = root.join("nested").join("Note.HTML");
+        let html = "<!DOCTYPE html><title>Café</title><p>unchanged</p>";
+
+        if Edition::current() != Edition::Full {
+            let error = export_html(destination.clone(), html.to_string()).unwrap_err();
+            assert!(matches!(error, AppError::CapabilityUnavailable(_)));
+            assert!(!destination.exists());
+            return;
+        }
+
+        export_html(destination.clone(), html.to_string()).expect("write html");
+        assert_eq!(fs::read(&destination).expect("read html"), html.as_bytes());
+        let temp_name = format!(
+            ".{}.tuxedo-tmp",
+            destination.file_name().unwrap().to_string_lossy()
+        );
+        assert!(!destination.parent().unwrap().join(temp_name).exists());
+
+        let htm = root.join("nested").join("page.HTM");
+        export_html(htm.clone(), html.to_string()).expect("write htm");
+        assert_eq!(fs::read(&htm).expect("read htm"), html.as_bytes());
+
+        assert!(matches!(
+            export_html(root.join("nested").join("note.md"), html.to_string()),
+            Err(AppError::NotHtml)
+        ));
+        assert!(!root.join("nested").join("note.md").exists());
+        assert!(matches!(
+            export_html(destination.clone(), String::new()),
+            Err(AppError::EmptyExport)
+        ));
+        let folder = root.join("folder.html");
+        fs::create_dir_all(&folder).expect("html directory");
+        assert!(matches!(
+            export_html(folder, html.to_string()),
+            Err(AppError::NotAFile)
+        ));
+        let huge = "x".repeat((MAX_EXPORT_HTML_BYTES as usize) + 1);
+        assert_eq!(huge.len(), 32 * 1024 * 1024 + 1);
+        assert!(matches!(
+            export_html(root.join("nested").join("big.html"), huge),
+            Err(AppError::ExportTooLarge)
+        ));
+        assert!(!root.join("nested").join("big.html").exists());
+    }
+
+    #[test]
+    fn theme_json_paths_accept_only_json_names() {
+        assert!(is_json_path(Path::new("Theme.JSON")));
+        assert!(is_json_path(Path::new("dir/theme.json")));
+        assert!(is_json_path(Path::new(".json")));
+        assert!(!is_json_path(Path::new("theme.md")));
+        assert!(!is_json_path(Path::new("theme.json.txt")));
+        assert!(!is_json_path(Path::new("theme")));
+    }
+
+    #[test]
+    fn theme_files_require_theme_studio_json_and_regular_files() {
+        let root = std::env::temp_dir().join(format!("tuxedo-theme-file-{}", std::process::id()));
+        let _cleanup = TempCleanup::prepare(root.clone());
+        let destination = root.join("nested").join("Theme.JSON");
+        let package = "{\"version\":1,\"name\":\"Midnight\"}";
+
+        if Edition::current() != Edition::Full {
+            fs::write(root.join("theme.json"), "secret").expect("seed theme file");
+            let error = read_theme_file(root.join("theme.json")).unwrap_err();
+            assert!(matches!(error, AppError::CapabilityUnavailable(_)));
+            let error = write_theme_file(root.join("theme.json"), "nope".to_string()).unwrap_err();
+            assert!(matches!(error, AppError::CapabilityUnavailable(_)));
+            assert_eq!(
+                fs::read_to_string(root.join("theme.json")).expect("untouched"),
+                "secret"
+            );
+            assert!(!destination.exists());
+            return;
+        }
+
+        write_theme_file(destination.clone(), package.to_string()).expect("write theme");
+        assert_eq!(
+            read_theme_file(destination.clone()).expect("read theme"),
+            package
+        );
+        let temp_name = format!(
+            ".{}.tuxedo-tmp",
+            destination.file_name().unwrap().to_string_lossy()
+        );
+        assert!(!destination.parent().unwrap().join(temp_name).exists());
+
+        assert!(matches!(
+            write_theme_file(root.join("nested").join("note.md"), package.to_string()),
+            Err(AppError::NotJson)
+        ));
+        assert!(matches!(
+            read_theme_file(root.join("nested").join("note.md")),
+            Err(AppError::NotJson)
+        ));
+        assert!(!root.join("nested").join("note.md").exists());
+
+        let folder = root.join("folder.json");
+        fs::create_dir_all(&folder).expect("json directory");
+        assert!(matches!(
+            read_theme_file(folder.clone()),
+            Err(AppError::NotAFile)
+        ));
+        assert!(matches!(
+            write_theme_file(folder, package.to_string()),
+            Err(AppError::NotAFile)
+        ));
+
+        let exact = "a".repeat(MAX_THEME_FILE_BYTES as usize);
+        let exact_path = root.join("exact.json");
+        write_theme_file(exact_path.clone(), exact.clone()).expect("exact write");
+        assert_eq!(read_theme_file(exact_path).expect("exact read"), exact);
+
+        let huge = "x".repeat((MAX_THEME_FILE_BYTES as usize) + 1);
+        assert!(matches!(
+            write_theme_file(root.join("big.json"), huge.clone()),
+            Err(AppError::ThemeFileTooLarge)
+        ));
+        assert!(!root.join("big.json").exists());
+        fs::write(root.join("stored.json"), &huge).expect("seed oversized");
+        assert!(matches!(
+            read_theme_file(root.join("stored.json")),
+            Err(AppError::ThemeFileTooLarge)
+        ));
     }
 
     #[test]
@@ -2078,5 +2914,209 @@ mod tests {
         assert!(!root.join("renamed.md").exists());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn raster_mime_is_derived_only_from_the_extension() {
+        assert_eq!(encode_base64(b""), "");
+        assert_eq!(encode_base64(b"h"), "aA==");
+        assert_eq!(encode_base64(b"hi"), "aGk=");
+        assert_eq!(encode_base64(b"hid"), "aGlk");
+        assert_eq!(raster_mime_type(Path::new("a.PNG")), Some("image/png"));
+        assert_eq!(raster_mime_type(Path::new("a.jpg")), Some("image/jpeg"));
+        assert_eq!(raster_mime_type(Path::new("a.JPEG")), Some("image/jpeg"));
+        assert_eq!(raster_mime_type(Path::new("a.gif")), Some("image/gif"));
+        assert_eq!(raster_mime_type(Path::new("a.webp")), Some("image/webp"));
+        assert_eq!(raster_mime_type(Path::new("a.svg")), None);
+        assert_eq!(raster_mime_type(Path::new("a.svg.png")), Some("image/png"));
+        assert_eq!(raster_mime_type(Path::new("a.png.svg")), None);
+    }
+
+    #[test]
+    fn confined_raster_read_stays_inside_the_allowed_root() {
+        let root = std::env::temp_dir().join(format!("tuxedo-img-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("tuxedo-img-out-{}", std::process::id()));
+        let _root_cleanup = TempCleanup::prepare(root.clone());
+        let _outside_cleanup = TempCleanup::prepare(outside.clone());
+        let notes = root.join("notes");
+        let images = root.join("images");
+        let assets = notes.join("assets");
+        fs::create_dir_all(&assets).expect("notes");
+        fs::create_dir_all(&images).expect("images");
+
+        let document = notes.join("doc.md");
+        fs::write(&document, "doc").expect("document");
+        let png_bytes = b"\x89PNG\r\n";
+        fs::write(images.join("plot.png"), png_bytes).expect("png");
+        fs::write(assets.join("inline.png"), png_bytes).expect("inline");
+        fs::write(images.join("icon.svg"), png_bytes).expect("svg bytes stay unsniffed");
+        fs::create_dir(notes.join("folder.png")).expect("directory");
+        let secret = outside.join("secret.png");
+        fs::write(&secret, b"secret").expect("secret");
+        let big = images.join("big.png");
+        let file = fs::File::create(&big).expect("big");
+        file.set_len(MAX_SCAN_FILE_BYTES + 1)
+            .expect("sparse length");
+        drop(file);
+
+        let canonical_root = fs::canonicalize(&root).expect("root");
+        let canonical_doc = fs::canonicalize(&document).expect("doc");
+        let doc_dir = canonical_doc.parent().expect("parent").to_path_buf();
+        assert_eq!(
+            allowed_image_root(Some(&canonical_root), &canonical_doc).expect("workspace root"),
+            canonical_root
+        );
+        assert_eq!(
+            allowed_image_root(None, &canonical_doc).expect("document dir"),
+            doc_dir
+        );
+
+        let sibling = resolve_image_candidate(&doc_dir, "../images/plot.png").expect("sibling");
+        let image = read_confined_raster_image(&canonical_root, &sibling).expect("sibling png");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.base64, encode_base64(png_bytes));
+        assert!(matches!(
+            read_confined_raster_image(&doc_dir, &sibling),
+            Err(AppError::ImageNotAllowed)
+        ));
+
+        let local = resolve_image_candidate(&doc_dir, "assets/inline.png").expect("local");
+        let local_image = read_confined_raster_image(&doc_dir, &local).expect("local png");
+        assert_eq!(local_image.mime_type, "image/png");
+
+        let svg = resolve_image_candidate(&doc_dir, "../images/icon.svg").expect("svg");
+        assert!(matches!(
+            read_confined_raster_image(&canonical_root, &svg),
+            Err(AppError::ImageTypeRejected)
+        ));
+        assert!(matches!(
+            read_confined_raster_image(&canonical_root, &notes.join("folder.png")),
+            Err(AppError::NotAFile)
+        ));
+        assert!(matches!(
+            read_confined_raster_image(&canonical_root, &secret),
+            Err(AppError::ImageNotAllowed)
+        ));
+        assert!(matches!(
+            read_confined_raster_image(&canonical_root, &big),
+            Err(AppError::ImageTooLarge)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raster_read_rejects_symlink_that_leaves_the_root() {
+        let root = std::env::temp_dir().join(format!("tuxedo-imglink-{}", std::process::id()));
+        let outside =
+            std::env::temp_dir().join(format!("tuxedo-imglink-out-{}", std::process::id()));
+        let _root_cleanup = TempCleanup::prepare(root.clone());
+        let _outside_cleanup = TempCleanup::prepare(outside.clone());
+        let secret = outside.join("secret.png");
+        fs::write(&secret, b"secret").expect("secret");
+        let link = root.join("link.png");
+        std::os::unix::fs::symlink(&secret, &link).expect("symlink");
+        let canonical_root = fs::canonicalize(&root).expect("root");
+        assert!(matches!(
+            read_confined_raster_image(&canonical_root, &link),
+            Err(AppError::ImageNotAllowed)
+        ));
+    }
+
+    #[test]
+    fn indexed_query_truncates_at_the_result_cap() {
+        let documents = (0..MAX_SEARCH_RESULTS + 5)
+            .map(|number| {
+                Arc::new(IndexedDocument {
+                    path: PathBuf::from(format!("n{number}.md")),
+                    relative_path: format!("n{number}.md"),
+                    name: format!("n{number}.md"),
+                    content: Some("hit".to_owned()),
+                })
+            })
+            .collect();
+        let index = WorkspaceSearchIndex {
+            root: PathBuf::from("vault"),
+            documents,
+        };
+        let outcome = query_search_index(&index, "hit", true);
+        assert_eq!(outcome.matches.len(), MAX_SEARCH_RESULTS);
+        assert!(outcome.truncated);
+        assert_eq!(outcome.scanned_files, MAX_SEARCH_RESULTS + 1);
+    }
+
+    #[test]
+    fn indexed_search_answers_a_five_hundred_file_vault_quickly() {
+        let root = std::env::temp_dir().join(format!("tuxedo-index-{}", std::process::id()));
+        let _cleanup = TempCleanup::prepare(root.clone());
+        for number in 0..500 {
+            let body = format!("heading\nmarker-{number} in the vault\n");
+            fs::write(root.join(format!("note-{number:03}.md")), body).expect("note");
+        }
+        let canonical = fs::canonicalize(&root).expect("root");
+        let index = build_workspace_search_index(&canonical).expect("index");
+        assert_eq!(index.documents.len(), 500);
+
+        let started = std::time::Instant::now();
+        let outcome = query_search_index(&index, "marker-42 in the vault", false);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "query took {elapsed:?}"
+        );
+        assert_eq!(outcome.matches.len(), 1);
+        assert_eq!(outcome.matches[0].line, 2);
+        assert_eq!(outcome.matches[0].relative_path, "note-042.md");
+        assert_eq!(outcome.matches[0].preview, "marker-42 in the vault");
+        assert!(!outcome.truncated);
+        assert_eq!(outcome.scanned_files, 500);
+
+        let folded = query_search_index(&index, "MARKER-42 IN THE VAULT", false);
+        assert_eq!(folded.matches.len(), 1);
+        let missed = query_search_index(&index, "MARKER-42 IN THE VAULT", true);
+        assert!(missed.matches.is_empty());
+
+        let empty = query_search_index(&index, " \t", false);
+        assert!(empty.matches.is_empty());
+        assert_eq!(empty.scanned_files, 0);
+        assert!(!empty.truncated);
+    }
+
+    #[test]
+    fn document_read_keeps_bom_and_original_newlines() {
+        let root = std::env::temp_dir().join(format!("tuxedo-utf8-{}", std::process::id()));
+        let _cleanup = TempCleanup::prepare(root.clone());
+
+        let bom_text = "\u{feff}hello";
+        let bom_path = root.join("bom.md");
+        write_document_bytes(&bom_path, bom_text.as_bytes()).expect("write bom");
+        let bom_bytes = fs::read(&bom_path).expect("read bom bytes");
+        assert_eq!(&bom_bytes[..3], &[0xEF, 0xBB, 0xBF]);
+        let bom_document = read_document(&bom_path).expect("read bom");
+        assert_eq!(bom_document.content, bom_text);
+        assert!(bom_document.content.starts_with('\u{feff}'));
+        assert_eq!(bom_document.content.as_bytes(), bom_text.as_bytes());
+
+        let lf_only = "alpha\nbeta\ngamma";
+        let lf_path = root.join("lf.md");
+        write_document_bytes(&lf_path, lf_only.as_bytes()).expect("write lf");
+        assert_eq!(fs::read(&lf_path).expect("lf bytes"), lf_only.as_bytes());
+        let lf_document = read_document(&lf_path).expect("read lf");
+        assert_eq!(lf_document.content.as_bytes(), lf_only.as_bytes());
+        assert!(!lf_document.content.contains('\r'));
+
+        let crlf_only = "alpha\r\nbeta\r\ngamma";
+        let crlf_path = root.join("crlf.md");
+        write_document_bytes(&crlf_path, crlf_only.as_bytes()).expect("write crlf");
+        assert_eq!(
+            fs::read(&crlf_path).expect("crlf bytes"),
+            crlf_only.as_bytes()
+        );
+        let crlf_document = read_document(&crlf_path).expect("read crlf");
+        assert_eq!(crlf_document.content.as_bytes(), crlf_only.as_bytes());
+        assert!(crlf_document.content.contains("\r\n"));
+
+        let invalid = root.join("bad.md");
+        fs::write(&invalid, [0xFF, 0xFE, b'A']).expect("invalid utf-8");
+        assert!(read_document(&invalid).is_err());
     }
 }

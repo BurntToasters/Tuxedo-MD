@@ -2,9 +2,11 @@ import { formatShortcut } from './shortcuts';
 
 export type MenuCommandId =
   | 'new-document'
+  | 'new-from-recipe'
   | 'open-document'
   | 'save-document'
   | 'save-document-as'
+  | 'export-html'
   | 'close-tab'
   | 'quit'
   | 'find'
@@ -16,6 +18,8 @@ export type MenuCommandId =
   | 'split-view'
   | 'preview-view'
   | 'toggle-focus-mode'
+  | 'focus-timer'
+  | 'theme-studio'
   | 'settings'
   | 'check-updates';
 
@@ -30,6 +34,7 @@ export function buildFileMenu(): MenuEntry[] {
       label: 'New Document',
       shortcut: formatShortcut({ mod: true, key: 'n' }),
     },
+    { type: 'item', id: 'new-from-recipe', label: 'New from Recipe…' },
     {
       type: 'item',
       id: 'open-document',
@@ -48,6 +53,7 @@ export function buildFileMenu(): MenuEntry[] {
       label: 'Save As…',
       shortcut: formatShortcut({ mod: true, shift: true, key: 's' }),
     },
+    { type: 'item', id: 'export-html', label: 'Export HTML…' },
     {
       type: 'item',
       id: 'close-tab',
@@ -107,6 +113,8 @@ export function buildViewMenu(): MenuEntry[] {
       shortcut: formatShortcut({ mod: true, shift: true, key: 'v' }),
     },
     { type: 'item', id: 'toggle-focus-mode', label: 'Focus Mode' },
+    { type: 'item', id: 'focus-timer', label: 'Focus Timer' },
+    { type: 'item', id: 'theme-studio', label: 'Theme Studio' },
     {
       type: 'item',
       id: 'settings',

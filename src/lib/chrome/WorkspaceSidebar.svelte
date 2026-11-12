@@ -333,6 +333,14 @@
                 <p class="empty-state">Every document has an inbound link.</p>
               {/each}
             </nav>
+            <h3 class="recent-heading">Missing titles ({linkGraph.untitled.length})</h3>
+            <nav class="outline-list" aria-label="Missing titles">
+              {#each linkGraph.untitled.slice(0, 50) as path (path)}
+                <button onclick={() => onopenworkspacerelative(path)} title={path}>{path}</button>
+              {:else}
+                <p class="empty-state">Every document has a title.</p>
+              {/each}
+            </nav>
           {/if}
         {/if}
       </div>

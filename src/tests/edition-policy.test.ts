@@ -85,27 +85,42 @@ describe('frontend edition registry', () => {
     expect(requestedEdition).toBe(expected);
   });
 
-  it('registers shipped and planned capabilities with correct flags', () => {
+  it('registers every capability as a shipped Pro feature', () => {
     const names = Object.keys(capabilityRegistry) as EditionCapability[];
     expect(names).toHaveLength(11);
     for (const name of names) {
       expect(capabilityRegistry[name].minimumEdition).toBe('full');
+      expect(capabilityRegistry[name].shipped).toBe(true);
     }
     expect(capabilityRegistry.workspaceSearch.shipped).toBe(true);
-    expect(capabilityRegistry.mermaid.shipped).toBe(false);
+    expect(capabilityRegistry.mermaid.shipped).toBe(true);
+    expect(capabilityRegistry.math.shipped).toBe(true);
+    expect(capabilityRegistry.exportProfiles.shipped).toBe(true);
+    expect(capabilityRegistry.themeStudio.shipped).toBe(true);
   });
 
-  it('ships exactly five capabilities and keeps mermaid unshipped', () => {
+  it('ships every registry capability', () => {
     const expected: EditionCapability[] = [
       'workspaceSearch',
       'backlinks',
       'wikiLinks',
       'tags',
       'workspaceIntelligence',
+      'mermaid',
+      'math',
+      'exportProfiles',
+      'themeStudio',
+      'documentRecipes',
+      'focusSessionPresets',
     ];
-    expect(shippedCapabilities).toHaveLength(5);
+    expect(shippedCapabilities).toHaveLength(11);
     expect(shippedCapabilities).toEqual(expected);
-    expect(capabilityRegistry.mermaid.shipped).toBe(false);
+    expect(capabilityRegistry.mermaid.shipped).toBe(true);
+    expect(capabilityRegistry.math.shipped).toBe(true);
+    expect(capabilityRegistry.exportProfiles.shipped).toBe(true);
+    expect(capabilityRegistry.themeStudio.shipped).toBe(true);
+    expect(capabilityRegistry.documentRecipes.shipped).toBe(true);
+    expect(capabilityRegistry.focusSessionPresets.shipped).toBe(true);
 
     const registryShipped = (Object.keys(capabilityRegistry) as EditionCapability[]).filter(
       (name) => capabilityRegistry[name].shipped

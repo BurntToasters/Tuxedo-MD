@@ -30,6 +30,12 @@ export const shippedCapabilities: EditionCapability[] = [
   'wikiLinks',
   'tags',
   'workspaceIntelligence',
+  'mermaid',
+  'math',
+  'exportProfiles',
+  'themeStudio',
+  'documentRecipes',
+  'focusSessionPresets',
 ];
 
 export type EditorMode = 'source' | 'split' | 'preview';
@@ -59,6 +65,11 @@ export interface FileDocument {
   fingerprint: DocumentFingerprint;
 }
 
+export interface PreviewImage {
+  mimeType: string;
+  base64: string;
+}
+
 export interface WorkspaceEntry {
   path: string;
   relativePath: string;
@@ -86,6 +97,8 @@ export interface DocumentReferences {
   name: string;
   links: string[];
   tags: string[];
+  /** False when the note has neither an ATX heading nor a non-empty frontmatter title. */
+  hasTitle?: boolean;
 }
 
 export type Theme = 'system' | 'dark' | 'light' | 'contrast';

@@ -240,11 +240,21 @@ describe('edition applyBuildInfo', () => {
         'tags',
         'workspaceIntelligence',
         'mermaid',
+        'math',
+        'exportProfiles',
+        'themeStudio',
+        'documentRecipes',
+        'focusSessionPresets',
       ],
       opaqueWindow: true,
     });
     expect(edition.hasCapability('workspaceSearch')).toBe(true);
-    expect(edition.hasCapability('mermaid')).toBe(false);
+    expect(edition.hasCapability('mermaid')).toBe(true);
+    expect(edition.hasCapability('math')).toBe(true);
+    expect(edition.hasCapability('exportProfiles')).toBe(true);
+    expect(edition.hasCapability('themeStudio')).toBe(true);
+    expect(edition.hasCapability('documentRecipes')).toBe(true);
+    expect(edition.hasCapability('focusSessionPresets')).toBe(true);
     expect(edition.editionState.opaqueWindow).toBe(true);
     expect(edition.isOpaqueWindow()).toBe(true);
   });

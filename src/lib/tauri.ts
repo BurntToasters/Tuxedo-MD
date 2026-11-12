@@ -6,6 +6,7 @@ import type {
   DocumentReferences,
   EditionCapability,
   FileDocument,
+  PreviewImage,
   SearchOutcome,
   WorkspaceEntry,
 } from './types';
@@ -46,6 +47,13 @@ export async function chooseWorkspace(): Promise<{
 
 export async function readDocument(path: string): Promise<FileDocument> {
   return invoke<FileDocument>('open_document', { path });
+}
+
+export async function readPreviewImage(
+  documentPath: string,
+  source: string
+): Promise<PreviewImage> {
+  return invoke<PreviewImage>('read_preview_image', { documentPath, source });
 }
 
 export async function scanWorkspace(root: string): Promise<WorkspaceEntry[]> {
@@ -106,6 +114,46 @@ export async function chooseSavePath(defaultPath?: string | null): Promise<strin
   if (!path) return null;
   await registerConsentedPath(path);
   return path;
+}
+
+export async function chooseExportHtmlPath(defaultPath?: string | null): Promise<string | null> {
+  const path = await save({
+    defaultPath: defaultPath ?? 'Untitled.html',
+    filters: [{ name: 'HTML', extensions: ['html', 'htm'] }],
+  });
+  if (!path) return null;
+  return path;
+}
+
+export async function chooseThemeSavePath(defaultPath?: string | null): Promise<string | null> {
+  const path = await save({
+    defaultPath: defaultPath ?? 'theme.json',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (!path) return null;
+  return path;
+}
+
+export async function chooseThemeOpenPath(): Promise<string | null> {
+  const path = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (!path || Array.isArray(path)) return null;
+  return path;
+}
+
+export async function readThemeFile(path: string): Promise<string> {
+  return invoke<string>('read_theme_file', { path });
+}
+
+export async function writeThemeFile(path: string, content: string): Promise<void> {
+  await invoke('write_theme_file', { path, content });
+}
+
+export async function exportHtml(path: string, html: string): Promise<void> {
+  await invoke('export_html', { path, html });
 }
 
 export async function probeDocument(path: string): Promise<FileDocument> {

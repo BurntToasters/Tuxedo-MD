@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { flushSync, mount, unmount } from 'svelte';
 import SettingsDialog from '../../lib/chrome/SettingsDialog.svelte';
-import { defaultSettings } from '../../lib/types';
+import { capabilityRegistry, hasCapability } from '../../lib/edition';
+import { defaultSettings, type EditionCapability } from '../../lib/types';
 
 describe('SettingsDialog component', () => {
   it('renders nothing when open is false', () => {
@@ -63,6 +64,40 @@ describe('SettingsDialog component', () => {
     const closeBtn = target.querySelector('header button.icon-button') as HTMLButtonElement;
     closeBtn.click();
     expect(onclose).toHaveBeenCalled();
+
+    unmount(comp);
+    target.remove();
+  });
+
+  it('lists every capability and keeps community editing available', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+
+    const comp = mount(SettingsDialog, {
+      target,
+      props: {
+        open: true,
+        settings: { ...defaultSettings },
+        editionLabel: 'Community',
+        isFullEdition: false,
+        onclose: vi.fn(),
+      },
+    });
+
+    const aboutNavBtn = target.querySelectorAll('.settings-sidebar button')[3] as HTMLButtonElement;
+    flushSync(() => {
+      aboutNavBtn.click();
+    });
+
+    expect(target.textContent).toContain('Open, edit, save, and recovery stay available');
+    const names = Object.keys(capabilityRegistry) as EditionCapability[];
+    const rows = [...target.querySelectorAll('.capability-comparison li')];
+    expect(rows).toHaveLength(names.length);
+    names.forEach((name, index) => {
+      const status = hasCapability(name) ? 'Included' : 'Not in this build';
+      expect(rows[index]?.textContent).toContain(capabilityRegistry[name].label);
+      expect(rows[index]?.textContent).toContain(status);
+    });
 
     unmount(comp);
     target.remove();

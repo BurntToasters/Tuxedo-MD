@@ -56,8 +56,10 @@
     retainedDocumentIds = [],
     findRequest = 0,
     revealRequest = null,
+    splitActive = false,
     onchange,
     onselectionchange,
+    onviewportline,
   }: {
     documentId: string;
     value?: string;
@@ -69,9 +71,16 @@
     visible?: boolean;
     retainedDocumentIds?: string[];
     findRequest?: number;
-    revealRequest?: { line: number; token: number } | null;
+    revealRequest?: {
+      line: number;
+      token: number;
+      focus?: boolean;
+      align?: 'start' | 'center';
+    } | null;
+    splitActive?: boolean;
     onchange: (value: string) => void;
     onselectionchange: (selection: { anchor: number; head: number }) => void;
+    onviewportline?: (line: number) => void;
   } = $props();
   let host: HTMLDivElement;
   let view: EditorView | undefined;
@@ -111,6 +120,9 @@
       highlightSelectionMatches(),
       markdown(),
       keymap.of([
+        { key: 'Mod-b', run: () => formatByShortcut('bold'), preventDefault: true },
+        { key: 'Mod-i', run: () => formatByShortcut('italic'), preventDefault: true },
+        { key: 'Mod-k', run: () => formatByShortcut('link'), preventDefault: true },
         ...closeBracketsKeymap,
         ...defaultKeymap,
         ...searchKeymap,
@@ -128,6 +140,7 @@
             head: update.state.selection.main.head,
           });
         }
+        if (update.viewportChanged && visible) onviewportline?.(firstVisibleLine(update.view));
         if (!update.docChanged) return;
         localValue = update.state.doc.toString();
         onchange(localValue);
@@ -147,6 +160,23 @@
       selection: selectionRange ? clampSelection(content, selectionRange) : undefined,
       extensions: ext,
     });
+  }
+
+  function publishVisibleLine() {
+    if (!view || !visible) return;
+    onviewportline?.(firstVisibleLine(view));
+  }
+
+  function firstVisibleLine(editor: EditorView) {
+    const doc = editor.state.doc;
+    const origin = Math.max(0, Math.min(editor.viewport.from, doc.length));
+    const block = editor.lineBlockAt(origin);
+    return doc.lineAt(Math.max(0, Math.min(block.from, doc.length))).number;
+  }
+
+  function formatByShortcut(type: 'bold' | 'italic' | 'link') {
+    insertFormat(type);
+    return true;
   }
 
   function insertFormat(
@@ -275,6 +305,7 @@
       const next = stateForDocument(documentId, value, selection);
       localValue = next.doc.toString();
       view.setState(next);
+      publishVisibleLine();
       lastSln = showLineNumbers;
       lastTs = tabSize;
       lastSc = spellcheck;
@@ -300,6 +331,7 @@
       const nextState = createState(currentDoc, { anchor, head });
       states.set(documentId, nextState);
       view.setState(nextState);
+      publishVisibleLine();
       return;
     }
 
@@ -307,6 +339,7 @@
     localValue = value;
     view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: value } });
     states.set(documentId, view.state);
+    publishVisibleLine();
   });
 
   $effect(() => {
@@ -322,11 +355,24 @@
     const totalLines = view.state.doc.lines;
     const lineNumber = Math.min(Math.max(revealRequest.line, 1), totalLines);
     const line = view.state.doc.line(lineNumber);
+    const align = revealRequest.align ?? 'center';
     view.dispatch({
       selection: { anchor: line.from, head: line.from },
-      effects: EditorView.scrollIntoView(line.from, { y: 'center' }),
+      effects: EditorView.scrollIntoView(
+        line.from,
+        align === 'start' ? { y: 'start', yMargin: 0 } : { y: 'center' }
+      ),
     });
-    view.focus();
+    if (revealRequest.focus !== false) view.focus();
+  });
+
+  $effect(() => {
+    if (!splitActive || !view) return;
+    const editor = view;
+    editor.requestMeasure({
+      read: (current) => firstVisibleLine(current),
+      write: (line) => onviewportline?.(line),
+    });
   });
 
   $effect(() => {

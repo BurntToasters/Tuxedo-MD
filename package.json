@@ -160,6 +160,8 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "codemirror": "^6.0.2",
+    "katex": "^0.19.1",
+    "mermaid": "^12.3.0",
     "rehype-raw": "^7.0.0",
     "rehype-sanitize": "^6.0.0",
     "rehype-stringify": "^10.0.1",

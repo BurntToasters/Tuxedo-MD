@@ -39,31 +39,31 @@ export const capabilityRegistry = {
     label: 'Mermaid diagrams',
     description: 'Renders Mermaid code blocks in the local preview and publishing pipeline.',
     minimumEdition: 'full',
-    shipped: false,
+    shipped: true,
   },
   math: {
     label: 'Math rendering',
     description: 'Renders mathematical notation in the local preview and publishing pipeline.',
     minimumEdition: 'full',
-    shipped: false,
+    shipped: true,
   },
   exportProfiles: {
     label: 'Export profiles',
     description: 'Saves reusable settings for deterministic local publishing and export.',
     minimumEdition: 'full',
-    shipped: false,
+    shipped: true,
   },
   themeStudio: {
     label: 'Theme Studio',
     description: 'Builds and previews custom Tuxedo MD themes using visual design controls.',
     minimumEdition: 'full',
-    shipped: false,
+    shipped: true,
   },
   documentRecipes: {
     label: 'Document Recipes',
     description: 'Combines templates, frontmatter defaults, naming rules, and export settings.',
     minimumEdition: 'full',
-    shipped: false,
+    shipped: true,
   },
   workspaceIntelligence: {
     label: 'Workspace Intelligence',
@@ -75,7 +75,7 @@ export const capabilityRegistry = {
     label: 'Focus session presets',
     description: 'Saves reusable local writing goals, timers, and session preferences.',
     minimumEdition: 'full',
-    shipped: false,
+    shipped: true,
   },
 } as const satisfies Record<EditionCapability, CapabilityDefinition>;
 

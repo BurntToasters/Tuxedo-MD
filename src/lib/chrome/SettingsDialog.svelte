@@ -11,9 +11,10 @@
     Sliders,
     X,
   } from '@lucide/svelte';
+  import { capabilityRegistry, hasCapability } from '../edition';
   import { handleDismissibleDialogKeydown } from '../focus';
   import { getLicenses } from '../tauri';
-  import { APP_VERSION, type AppSettings } from '../types';
+  import { APP_VERSION, type AppSettings, type EditionCapability } from '../types';
 
   let {
     open = false,
@@ -59,6 +60,7 @@
   let licensesError = $state<string | null>(null);
   let licenseSearch = $state('');
   let expandedLicensePackage = $state<string | null>(null);
+  const capabilityNames = Object.keys(capabilityRegistry) as EditionCapability[];
 
   async function loadLicenses() {
     if (Object.keys(licenses).length > 0) return;
@@ -327,7 +329,7 @@
               <p class="settings-note">
                 {isFullEdition
                   ? 'Pro is enabled for advanced local workflows, publishing, intelligence, and customization.'
-                  : 'Community includes complete local Markdown editing. Pro adds advanced local workflows, publishing, intelligence, and customization.'}
+                  : 'Community includes complete local Markdown editing. Open, edit, save, and recovery stay available. Pro adds advanced local workflows, publishing, intelligence, and customization.'}
               </p>
               {#if editionWarning}
                 <p class="settings-note" role="alert">
@@ -335,6 +337,16 @@
                   {editionWarning}
                 </p>
               {/if}
+
+              <h3>Capabilities</h3>
+              <ul class="capability-comparison">
+                {#each capabilityNames as name (name)}
+                  <li>
+                    <span>{capabilityRegistry[name].label}</span>
+                    <span>{hasCapability(name) ? 'Included' : 'Not in this build'}</span>
+                  </li>
+                {/each}
+              </ul>
 
               {#if updatesSupported}
                 <h3>Updates</h3>
@@ -451,3 +463,27 @@
     </dialog>
   </div>
 {/if}
+
+<style>
+  .capability-comparison {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .capability-comparison li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--text);
+    font-size: 12px;
+  }
+
+  .capability-comparison li span:last-child {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+  }
+</style>
